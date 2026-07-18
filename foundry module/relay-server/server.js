@@ -1,17 +1,31 @@
 /**
- * hp-bridge relay
- * ---------------
+ * foundry-controller relay
+ * ------------------------
  * Sits between:
- *   - the "hp-bridge" Foundry module, which dials IN to us over a
+ *   - the "foundry-controller" Foundry module, which dials IN to us over a
  *     WebSocket (path /bridge), and
  *   - an external HTTP client (e.g. the ESP8266 HP monitor), which talks
  *     to us over plain HTTP.
  *
  * HTTP surface is deliberately tiny:
- *   GET  /characters        -> every character checked "Send to HP Monitor"
- *                              in Foundry, full data, in one response.
- *   POST /characters/update -> update one of those characters' hp/tempHp.
- *   GET  /healthz           -> liveness + whether a Foundry world is linked.
+ *   GET  /characters          -> every character checked "Send to HP
+ *                                Monitor" in Foundry, full data, in one
+ *                                response.
+ *   POST /characters/update   -> update one of those characters' hp/tempHp.
+ *   POST /tokens/move         -> preview-only: set a target {col, row} for
+ *                                a character's token and get back the
+ *                                distance to it. Doesn't move anything yet
+ *                                - mirrors hovering a drag before dropping
+ *                                it. Must be followed by a call to
+ *                                /tokens/move/confirm to actually commit it.
+ *   POST /tokens/move/confirm -> commit the target set by the last
+ *                                /tokens/move call for a given uuid.
+ *   POST /tokens/move/cancel  -> discard the pending target set by
+ *                                /tokens/move for a given uuid.
+ *   POST /tokens/circle       -> drop a circular map template centered on
+ *                                a character's token, optionally
+ *                                self-deleting after durationMs.
+ *   GET  /healthz              -> liveness + whether a Foundry world is linked.
  *
  * NOTE: authentication has been removed. Anyone who can reach this
  * server on the network can read/update characters and can connect as
@@ -110,11 +124,11 @@ wss.on("connection", (ws) => {
   // No handshake/auth step: the first connection becomes the active
   // Foundry link. A "hello" message can still optionally set metadata.
   if (foundryConn && foundryConn.ws !== ws) {
-    console.log("[hp-bridge-relay] replacing existing Foundry connection.");
+    console.log("[foundry-controller-relay] replacing existing Foundry connection.");
     try { foundryConn.ws.close(4002, "replaced by new connection"); } catch {}
   }
   foundryConn = { ws, worldTitle: "Foundry World", system: "" };
-  console.log("[hp-bridge-relay] Foundry world connected.");
+  console.log("[foundry-controller-relay] Foundry world connected.");
 
   ws.on("message", (raw) => {
     let msg;
@@ -127,7 +141,7 @@ wss.on("connection", (ws) => {
     if (msg.type === "hello") {
       foundryConn.worldTitle = msg.worldTitle || foundryConn.worldTitle;
       foundryConn.system = msg.system || foundryConn.system;
-      console.log(`[hp-bridge-relay] Foundry world identified: "${foundryConn.worldTitle}" (${foundryConn.system})`);
+      console.log(`[foundry-controller-relay] Foundry world identified: "${foundryConn.worldTitle}" (${foundryConn.system})`);
       return;
     }
 
@@ -142,7 +156,7 @@ wss.on("connection", (ws) => {
 
   ws.on("close", () => {
     if (foundryConn && foundryConn.ws === ws) {
-      console.warn("[hp-bridge-relay] Foundry world disconnected.");
+      console.warn("[foundry-controller-relay] Foundry world disconnected.");
       foundryConn = null;
     }
   });
@@ -189,6 +203,93 @@ app.post("/characters/update", async (req, res) => {
   }
 });
 
+// Preview-only move: sets a target grid cell for a character's token and
+// reports the distance to it, without moving anything yet. Follow up with
+// /tokens/move/confirm to commit, or /tokens/move/cancel to discard.
+// Body: {"uuid":"...", "col":4, "row":2, "timeoutMs":15000}
+app.post("/tokens/move", async (req, res) => {
+  const { uuid, col, row, timeoutMs } = req.body || {};
+  if (!uuid) {
+    res.status(400).json({ error: "missing uuid in body" });
+    return;
+  }
+  if (col === undefined && row === undefined) {
+    res.status(400).json({ error: "must provide col and/or row in body" });
+    return;
+  }
+  try {
+    const result = await callFoundry("move", { uuid, col, row, timeoutMs });
+    if (!result.ok) {
+      res.status(502).json({ error: result.error || "move preview failed" });
+      return;
+    }
+    res.json({ ok: true, preview: result.preview });
+  } catch (err) {
+    res.status(504).json({ error: String(err.message || err) });
+  }
+});
+
+// Commits whichever target the last /tokens/move call set for this uuid.
+// Body: {"uuid":"..."}
+app.post("/tokens/move/confirm", async (req, res) => {
+  const { uuid } = req.body || {};
+  if (!uuid) {
+    res.status(400).json({ error: "missing uuid in body" });
+    return;
+  }
+  try {
+    const result = await callFoundry("moveConfirm", { uuid });
+    if (!result.ok) {
+      res.status(502).json({ error: result.error || "move confirm failed" });
+      return;
+    }
+    res.json({ ok: true, token: result.token });
+  } catch (err) {
+    res.status(504).json({ error: String(err.message || err) });
+  }
+});
+
+// Discards the pending target set by /tokens/move for this uuid, without
+// moving the token.
+// Body: {"uuid":"..."}
+app.post("/tokens/move/cancel", async (req, res) => {
+  const { uuid } = req.body || {};
+  if (!uuid) {
+    res.status(400).json({ error: "missing uuid in body" });
+    return;
+  }
+  try {
+    const result = await callFoundry("moveCancel", { uuid });
+    if (!result.ok) {
+      res.status(502).json({ error: result.error || "move cancel failed" });
+      return;
+    }
+    res.json({ ok: true, cleared: result.cleared });
+  } catch (err) {
+    res.status(504).json({ error: String(err.message || err) });
+  }
+});
+
+// Drops a circular map template centered on a character's token.
+// Body: {"uuid":"...", "radius":10, "color":"#ff0000", "durationMs":4000}
+app.post("/tokens/circle", async (req, res) => {
+  const { uuid, radius, color, durationMs } = req.body || {};
+  if (!uuid) {
+    res.status(400).json({ error: "missing uuid in body" });
+    return;
+  }
+  try {
+    const result = await callFoundry("circle", { uuid, radius, color, durationMs });
+    if (!result.ok) {
+      res.status(502).json({ error: result.error || "circle failed" });
+      return;
+    }
+    res.json({ ok: true, templateId: result.templateId, sceneId: result.sceneId });
+  } catch (err) {
+    res.status(504).json({ error: String(err.message || err) });
+  }
+});
+
 app.get("/healthz", (req, res) => {
   res.json({ ok: true, foundryConnected: !!foundryConn });
 });
@@ -212,12 +313,12 @@ server.listen(CONFIG.PORT, () => {
   const lanAddrs = getLanAddresses();
   const host = lanAddrs[0] || "localhost";
 
-  console.log(`[hp-bridge-relay] listening on http://${host}:${CONFIG.PORT}`);
-  console.log(`[hp-bridge-relay] Foundry module should point at ws://${host}:${CONFIG.PORT}/bridge`);
+  console.log(`[foundry-controller-relay] listening on http://${host}:${CONFIG.PORT}`);
+  console.log(`[foundry-controller-relay] Foundry module should point at ws://${host}:${CONFIG.PORT}/bridge`);
 
   if (lanAddrs.length > 1) {
-    console.log(`[hp-bridge-relay] other reachable addresses: ${lanAddrs.slice(1).join(", ")}`);
+    console.log(`[foundry-controller-relay] other reachable addresses: ${lanAddrs.slice(1).join(", ")}`);
   } else if (lanAddrs.length === 0) {
-    console.log("[hp-bridge-relay] no non-internal network interface found; falling back to localhost.");
+    console.log("[foundry-controller-relay] no non-internal network interface found; falling back to localhost.");
   }
 });

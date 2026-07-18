@@ -6,23 +6,37 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <ArduinoJson.h>
+#include <map>
 
 // -------------------------------------------------------------------------
 // NOTE ON API SHAPE
 // -------------------------------------------------------------------------
-// This targets the self-hosted "hp-bridge" relay (see hp-bridge-module/ in
-// this project), not a generic Foundry REST API. Characters are opted in
-// one at a time from a checkbox the hp-bridge Foundry module adds to each
-// character sheet ("Send to HP Monitor") - only those characters are ever
-// visible here. The HTTP surface is deliberately just two endpoints:
+// This targets the self-hosted "foundry-controller" relay (see
+// foundry-controller-module/ in this project), not a generic Foundry REST
+// API. Characters are opted in one at a time from a checkbox the
+// foundry-controller Foundry module adds to each character sheet ("Send to
+// HP Monitor") - only those characters are ever visible here. The HTTP
+// surface:
 //
-//   GET  /characters         -> every opted-in character's full data:
-//                                {"characters":[{"uuid","name","hp","maxHp","tempHp"}, ...]}
-//   POST /characters/update  -> body {"uuid":"...","hp":N,"tempHp":N}
-//                                updates one of those characters
-//   GET  /healthz            -> {"ok":true,"foundryConnected":bool}, used
-//                                by connect() to confirm both the relay and
-//                                a Foundry world are reachable
+//   GET  /characters          -> every opted-in character's full data:
+//                                 {"characters":[{"uuid","name","hp","maxHp","tempHp"}, ...]}
+//   POST /characters/update   -> body {"uuid":"...","hp":N,"tempHp":N}
+//                                 updates one of those characters
+//   POST /tokens/move         -> body {"uuid":"...","col":N,"row":N,"timeoutMs":N}
+//                                 sets (but does not yet commit) a target
+//                                 grid cell for a character's token; the
+//                                 response reports the distance to it
+//   POST /tokens/move/confirm -> body {"uuid":"..."}
+//                                 commits whichever target the last
+//                                 /tokens/move call set for that uuid
+//   POST /tokens/move/cancel  -> body {"uuid":"..."}
+//                                 discards the pending target instead
+//   POST /tokens/circle       -> body {"uuid":"...","radius":N,"color":"#rrggbb","durationMs":N}
+//                                 drops a circular map template centered
+//                                 on a character's token
+//   GET  /healthz              -> {"ok":true,"foundryConnected":bool}, used
+//                                 by connect() to confirm both the relay and
+//                                 a Foundry world are reachable
 //
 // There is no authentication on requests to the relay - it's assumed to be
 // running on a trusted local network alongside the Foundry world it talks
@@ -38,16 +52,18 @@
 // Runtime-toggleable via setTestMode()/testMode() - and the "Local Relay
 // Test Mode" entry on the settings screen - rather than the compile-time
 // #if this used to be. Defaults to RELAY_TEST_MODE from config.h. When
-// enabled, connect()/fetchCharacters()/updateCharacterHp() skip the
-// relay's HTTP surface entirely and operate on a small predefined party
-// kept in RAM instead: connect() "succeeds" after a short simulated
-// delay, so showRelayConnecting() is still visible for a beat, and every
+// enabled, connect()/fetchCharacters()/updateCharacterHp()/previewMove()/
+// confirmMove()/cancelMove()/createCircle() skip the relay's HTTP surface
+// entirely and operate on a small predefined party kept in RAM instead:
+// connect() "succeeds" after a short simulated delay, so
+// showRelayConnecting() is still visible for a beat, and every
 // fetch/update call operates on the in-memory roster in mockParty()
-// below. Edit that list to whatever party/HP spread is useful to test
-// with. Toggling it takes effect the next time you (re)connect - i.e. the
-// next long-press on the IP entry screen - not mid-connection. main.cpp
-// needs no changes either way - this only swaps out what's behind the
-// RelayClient:: functions it already calls.
+// below (token positions for move previews live alongside it in
+// mockTokenStates()). Edit that list to whatever party/HP spread is
+// useful to test with. Toggling it takes effect the next time you
+// (re)connect - i.e. the next long-press on the IP entry screen - not
+// mid-connection. main.cpp needs no changes either way - this only swaps
+// out what's behind the RelayClient:: functions it already calls.
 // -------------------------------------------------------------------------
 #ifndef RELAY_TEST_MODE
 #define RELAY_TEST_MODE 0
@@ -99,6 +115,30 @@ namespace RelayClient
     return party;
   }
 
+  // Tracks each mock character's simulated token position, plus at most
+  // one pending (unconfirmed) move target, so previewMove()/confirmMove()/
+  // cancelMove() have something realistic to operate on in test mode.
+  // Positions start at (0, 0) the first time a given uuid is touched.
+  struct MockTokenState
+  {
+    int col = 0;
+    int row = 0;
+    bool hasPending = false;
+    int pendingCol = 0;
+    int pendingRow = 0;
+  };
+
+  static std::map<String, MockTokenState> &mockTokenStates()
+  {
+    static std::map<String, MockTokenState> states;
+    return states;
+  }
+
+  // Assumes 5ft-per-cell for the simulated distance readout, matching the
+  // most common dnd5e default - test mode doesn't model actual scene grid
+  // configuration.
+  static float mockCellDistanceUnit() { return 5.0f; }
+
   // -----------------------------------------------------------------------
   // Real relay (HTTP) helpers
   // -----------------------------------------------------------------------
@@ -123,6 +163,60 @@ namespace RelayClient
     out.hp = obj["hp"] | 0;
     out.maxHp = obj["maxHp"] | 1;
     out.tempHp = obj["tempHp"] | 0;
+    return true;
+  }
+
+  // Shared by updateCharacterHp()/previewMove()/confirmMove()/cancelMove()/
+  // createCircle(): POSTs a JSON body to `path` on the relay and parses
+  // the JSON response into `responseDoc`. On any failure (not connected,
+  // transport error, non-2xx status, malformed response body) fills
+  // `errOut` and returns false, pulling the relay's own {"error":"..."}
+  // message out of the body when present.
+  static bool doPost(const String &path, const JsonDocument &bodyDoc, JsonDocument &responseDoc, String &errOut)
+  {
+    if (!s_connected)
+    {
+      errOut = "not connected";
+      return false;
+    }
+
+    HTTPClient http;
+    WiFiClient client;
+    String url = baseUrl() + path;
+    if (!http.begin(client, url))
+    {
+      errOut = "http.begin failed";
+      return false;
+    }
+    applyCommonHeaders(http);
+    http.addHeader("Content-Type", "application/json");
+
+    String body;
+    serializeJson(bodyDoc, body);
+    int code = http.POST(body);
+
+    if (code != HTTP_CODE_OK && code != 201 && code != 204)
+    {
+      JsonDocument errDoc;
+      if (deserializeJson(errDoc, http.getStream()) == DeserializationError::Ok && !errDoc["error"].isNull())
+      {
+        errOut = "POST " + path + " -> " + String(code) + ": " + errDoc["error"].as<String>();
+      }
+      else
+      {
+        errOut = "POST " + path + " -> " + String(code);
+      }
+      http.end();
+      return false;
+    }
+
+    DeserializationError err = deserializeJson(responseDoc, http.getStream());
+    http.end();
+    if (err)
+    {
+      errOut = path + " JSON parse: " + String(err.c_str());
+      return false;
+    }
     return true;
   }
 
@@ -286,43 +380,191 @@ namespace RelayClient
       return false;
     }
 
-    HTTPClient http;
-    WiFiClient client;
-    String url = baseUrl() + "/characters/update";
-    if (!http.begin(client, url))
+    JsonDocument reqDoc;
+    reqDoc["uuid"] = uuid;
+    reqDoc["hp"] = newHp;
+    reqDoc["tempHp"] = newTempHp;
+
+    JsonDocument respDoc;
+    String errOut;
+    if (!doPost("/characters/update", reqDoc, respDoc, errOut))
     {
-      s_lastError = "http.begin failed";
+      s_lastError = errOut;
       return false;
     }
-    applyCommonHeaders(http);
-    http.addHeader("Content-Type", "application/json");
 
-    JsonDocument doc;
-    doc["uuid"] = uuid;
-    doc["hp"] = newHp;
-    doc["tempHp"] = newTempHp;
+    return true;
+  }
 
-    String body;
-    serializeJson(doc, body);
-
-    int code = http.POST(body);
-
-    if (code != HTTP_CODE_OK && code != 201 && code != 204)
+  bool previewMove(const String &uuid, int col, int row, MovePreviewResult &out, uint32_t timeoutMs)
+  {
+    if (s_testMode)
     {
-      // Try to surface the relay's own error message if it sent JSON back.
-      JsonDocument errDoc;
-      if (deserializeJson(errDoc, http.getStream()) == DeserializationError::Ok && !errDoc["error"].isNull())
-      {
-        s_lastError = "POST /characters/update -> " + String(code) + ": " + errDoc["error"].as<String>();
-      }
-      else
-      {
-        s_lastError = "POST /characters/update -> " + String(code);
-      }
-      http.end();
+      MockTokenState &state = mockTokenStates()[uuid]; // default-constructs at (0,0) if new
+      state.pendingCol = col;
+      state.pendingRow = row;
+      state.hasPending = true;
+
+      float dx = float(col - state.col);
+      float dy = float(row - state.row);
+      out.col = col;
+      out.row = row;
+      out.distance = sqrtf(dx * dx + dy * dy) * mockCellDistanceUnit();
+      out.units = "ft";
+      return true;
+    }
+
+    if (!s_connected)
+    {
+      s_lastError = "not connected";
       return false;
     }
-    http.end();
+
+    JsonDocument reqDoc;
+    reqDoc["uuid"] = uuid;
+    reqDoc["col"] = col;
+    reqDoc["row"] = row;
+    if (timeoutMs > 0)
+      reqDoc["timeoutMs"] = timeoutMs;
+
+    JsonDocument respDoc;
+    String errOut;
+    if (!doPost("/tokens/move", reqDoc, respDoc, errOut))
+    {
+      s_lastError = errOut;
+      return false;
+    }
+
+    JsonObject preview = respDoc["preview"].as<JsonObject>();
+    if (preview.isNull())
+    {
+      s_lastError = "unexpected /tokens/move response shape";
+      return false;
+    }
+
+    out.col = preview["col"] | col;
+    out.row = preview["row"] | row;
+    out.distance = preview["distance"] | 0.0f;
+    out.units = preview["units"] | "";
+    return true;
+  }
+
+  bool confirmMove(const String &uuid, MoveResult &out)
+  {
+    if (s_testMode)
+    {
+      auto it = mockTokenStates().find(uuid);
+      if (it == mockTokenStates().end() || !it->second.hasPending)
+      {
+        s_lastError = "mock: no pending move target for uuid " + uuid;
+        return false;
+      }
+      it->second.col = it->second.pendingCol;
+      it->second.row = it->second.pendingRow;
+      it->second.hasPending = false;
+      out.col = it->second.col;
+      out.row = it->second.row;
+      return true;
+    }
+
+    if (!s_connected)
+    {
+      s_lastError = "not connected";
+      return false;
+    }
+
+    JsonDocument reqDoc;
+    reqDoc["uuid"] = uuid;
+
+    JsonDocument respDoc;
+    String errOut;
+    if (!doPost("/tokens/move/confirm", reqDoc, respDoc, errOut))
+    {
+      s_lastError = errOut;
+      return false;
+    }
+
+    JsonObject token = respDoc["token"].as<JsonObject>();
+    if (token.isNull())
+    {
+      s_lastError = "unexpected /tokens/move/confirm response shape";
+      return false;
+    }
+
+    out.col = token["col"] | 0;
+    out.row = token["row"] | 0;
+    return true;
+  }
+
+  bool cancelMove(const String &uuid, bool *outCleared)
+  {
+    if (s_testMode)
+    {
+      auto it = mockTokenStates().find(uuid);
+      bool cleared = (it != mockTokenStates().end()) && it->second.hasPending;
+      if (cleared)
+        it->second.hasPending = false;
+      if (outCleared)
+        *outCleared = cleared;
+      return true;
+    }
+
+    if (!s_connected)
+    {
+      s_lastError = "not connected";
+      return false;
+    }
+
+    JsonDocument reqDoc;
+    reqDoc["uuid"] = uuid;
+
+    JsonDocument respDoc;
+    String errOut;
+    if (!doPost("/tokens/move/cancel", reqDoc, respDoc, errOut))
+    {
+      s_lastError = errOut;
+      return false;
+    }
+
+    if (outCleared)
+      *outCleared = respDoc["cleared"] | false;
+    return true;
+  }
+
+  bool createCircle(const String &uuid, float radius, const String &color, uint32_t durationMs, String *outTemplateId)
+  {
+    if (s_testMode)
+    {
+      if (outTemplateId)
+        *outTemplateId = "mock-template-" + uuid;
+      return true;
+    }
+
+    if (!s_connected)
+    {
+      s_lastError = "not connected";
+      return false;
+    }
+
+    JsonDocument reqDoc;
+    reqDoc["uuid"] = uuid;
+    if (radius > 0)
+      reqDoc["radius"] = radius;
+    if (color.length() > 0)
+      reqDoc["color"] = color;
+    if (durationMs > 0)
+      reqDoc["durationMs"] = durationMs;
+
+    JsonDocument respDoc;
+    String errOut;
+    if (!doPost("/tokens/circle", reqDoc, respDoc, errOut))
+    {
+      s_lastError = errOut;
+      return false;
+    }
+
+    if (outTemplateId)
+      *outTemplateId = respDoc["templateId"] | "";
     return true;
   }
 

@@ -1,5 +1,6 @@
 #include "InputManager.h"
 #include "config.h"
+#include <Wire.h>
 
 namespace InputManager
 {
@@ -16,6 +17,8 @@ namespace InputManager
   // ---------------------------------------------------------------------
   // Rotary encoder - interrupt driven quadrature decode
   // ---------------------------------------------------------------------
+  // Unchanged by the RKJXT1F42001 switch: CLK/DT stay on native GPIO (see
+  // config.h for why quadrature decoding can't move to the I2C expander).
   static volatile int32_t s_rawCounter = 0;
   static int32_t s_lastProcessed = 0;
   static volatile uint8_t s_lastAB = 0;
@@ -111,12 +114,72 @@ namespace InputManager
 
     return accelSteps;
   }
+
   // ---------------------------------------------------------------------
-  // Debounced short/long press button state machine
+  // PCF8575 I2C expander - encoder center push, joystick, Button B
   // ---------------------------------------------------------------------
+  // Quasi-bidirectional: a pin reads as an input (with a weak internal
+  // pull-up) as long as its output latch is left at 1, which is also the
+  // power-on default - pcf8575Write(0xFFFF) in begin() makes that explicit
+  // rather than relying on the power-on state alone. All six pins we use
+  // (P0-P5) are simple switch-to-GND closures, so a read bit of 0 means
+  // pressed, 1 means released - the same polarity as the old native
+  // INPUT_PULLUP digitalRead() calls, so the debounce state machine below
+  // is unchanged.
+  static void pcf8575Write(uint16_t value)
+  {
+    Wire.beginTransmission(PCF8575_I2C_ADDR);
+    Wire.write((uint8_t)(value & 0xFF));        // P0-P7
+    Wire.write((uint8_t)((value >> 8) & 0xFF)); // P8-P15
+    Wire.endTransmission();
+  }
+
+  static uint16_t pcf8575Read()
+  {
+    if (Wire.requestFrom((uint8_t)PCF8575_I2C_ADDR, (uint8_t)2) != 2)
+    {
+      // Bus error / expander not responding - fail safe as "everything
+      // released" (all 1s) rather than spuriously reporting every button
+      // as pressed.
+      return 0xFFFF;
+    }
+    uint8_t lo = Wire.read(); // P0-P7
+    uint8_t hi = Wire.read(); // P8-P15
+    return (uint16_t)lo | ((uint16_t)hi << 8);
+  }
+
+  // One I2C transaction covers all six pins we care about, so every
+  // pollButton*()/pollJoy*() call in a given loop() iteration shares a
+  // single read instead of hitting the bus once per pin. PIN_EXPANDER_INT
+  // (see config.h) would let us skip reads entirely while idle, but at the
+  // ~5ms loop cadence here a single 2-byte I2C transaction is already a
+  // small fraction of the budget, so this simpler "once per millis()" cache
+  // is used instead; /INT is left available for a future power-saving pass.
+  static uint16_t s_expanderCache = 0xFFFF;
+  static unsigned long s_expanderCacheMs = 0;
+  static bool s_expanderCacheValid = false;
+
+  static uint16_t expanderState()
+  {
+    unsigned long now = millis();
+    if (!s_expanderCacheValid || now != s_expanderCacheMs)
+    {
+      s_expanderCache = pcf8575Read();
+      s_expanderCacheMs = now;
+      s_expanderCacheValid = true;
+    }
+    return s_expanderCache;
+  }
+
+  // ---------------------------------------------------------------------
+  // Debounced short/long/double press state machine
+  // ---------------------------------------------------------------------
+  // Used for both PCF8575 buttons (A, B) and the four joystick directions -
+  // all six are the same kind of switch-to-GND closure, just on different
+  // expander bits.
   struct ButtonState
   {
-    uint8_t pin;
+    uint8_t expBit;                        // PCF8575 pin (EXP_PIN_*)
     bool lastRawState = HIGH;
     bool debouncedState = HIGH;
     unsigned long lastChangeMs = 0;
@@ -129,17 +192,21 @@ namespace InputManager
 
   static ButtonState s_btnA;
   static ButtonState s_btnB;
+  static ButtonState s_joyUp;
+  static ButtonState s_joyDown;
+  static ButtonState s_joyLeft;
+  static ButtonState s_joyRight;
 
   static ButtonEvent pollButton(ButtonState &btn)
   {
-    bool raw = digitalRead(btn.pin);
+    bool raw = (expanderState() >> btn.expBit) & 0x01;
     unsigned long now = millis();
 
     if (raw != btn.lastRawState)
     {
       if (s_debugEnabled)
       {
-        Serial.printf("[button pin %d] raw -> %s\n", btn.pin, raw ? "HIGH" : "LOW");
+        Serial.printf("[input P%d] raw -> %s\n", btn.expBit, raw ? "HIGH" : "LOW");
       }
       btn.lastChangeMs = now;
       btn.lastRawState = raw;
@@ -167,7 +234,7 @@ namespace InputManager
             btn.awaitingSecondClick = false;
             if (s_debugEnabled)
             {
-              Serial.printf("[button pin %d] DOUBLE_PRESS\n", btn.pin);
+              Serial.printf("[input P%d] DOUBLE_PRESS\n", btn.expBit);
             }
             return ButtonEvent::DOUBLE_PRESS;
           }
@@ -190,7 +257,7 @@ namespace InputManager
       btn.awaitingSecondClick = false; // a long press cancels any pending pairing wait
       if (s_debugEnabled)
       {
-        Serial.printf("[button pin %d] LONG_PRESS (held, still down)\n", btn.pin);
+        Serial.printf("[input P%d] LONG_PRESS (held, still down)\n", btn.expBit);
       }
       return ButtonEvent::LONG_PRESS;
     }
@@ -202,7 +269,7 @@ namespace InputManager
       btn.awaitingSecondClick = false;
       if (s_debugEnabled)
       {
-        Serial.printf("[button pin %d] SHORT_PRESS (held %lums)\n", btn.pin, now - btn.firstClickReleaseMs);
+        Serial.printf("[input P%d] SHORT_PRESS (held %lums)\n", btn.expBit, now - btn.firstClickReleaseMs);
       }
       return ButtonEvent::SHORT_PRESS;
     }
@@ -213,15 +280,36 @@ namespace InputManager
   ButtonEvent pollButtonA() { return pollButton(s_btnA); }
   ButtonEvent pollButtonB() { return pollButton(s_btnB); }
 
+  ButtonEvent pollJoyUp() { return pollButton(s_joyUp); }
+  ButtonEvent pollJoyDown() { return pollButton(s_joyDown); }
+  ButtonEvent pollJoyLeft() { return pollButton(s_joyLeft); }
+  ButtonEvent pollJoyRight() { return pollButton(s_joyRight); }
+
   void begin()
   {
     pinMode(PIN_ENCODER_CLK, INPUT_PULLUP);
     pinMode(PIN_ENCODER_DT, INPUT_PULLUP);
-    pinMode(PIN_ENCODER_BTN, INPUT_PULLUP);
-    pinMode(PIN_BUTTON2, INPUT_PULLUP);
 
-    s_btnA.pin = PIN_ENCODER_BTN;
-    s_btnB.pin = PIN_BUTTON2;
+    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+
+    // GPIO16 can't do attachInterrupt() (see config.h), so /INT is only
+    // usable as a polled digitalRead(). It's not needed for correctness at
+    // the current loop cadence (see expanderState() above) - left as a
+    // plain input here so it's available if a future power-saving pass
+    // wants it.
+    pinMode(PIN_EXPANDER_INT, INPUT);
+
+    // Quasi-bidirectional PCF8575: writing 1 to every pin is what puts them
+    // all in input-with-pull-up mode (also the power-on default, but made
+    // explicit here rather than relied upon).
+    pcf8575Write(0xFFFF);
+
+    s_btnA.expBit = EXP_PIN_ENCODER_BTN;
+    s_btnB.expBit = EXP_PIN_BUTTON2;
+    s_joyUp.expBit = EXP_PIN_JOY_UP;
+    s_joyDown.expBit = EXP_PIN_JOY_DOWN;
+    s_joyLeft.expBit = EXP_PIN_JOY_LEFT;
+    s_joyRight.expBit = EXP_PIN_JOY_RIGHT;
 
     s_lastAB = (digitalRead(PIN_ENCODER_CLK) << 1) | digitalRead(PIN_ENCODER_DT);
 
@@ -230,11 +318,15 @@ namespace InputManager
 
     if (s_debugEnabled)
     {
-      Serial.printf("[input] CLK=GPIO%d DT=GPIO%d BTN_A=GPIO%d BTN_B=GPIO%d\n",
-                    PIN_ENCODER_CLK, PIN_ENCODER_DT, PIN_ENCODER_BTN, PIN_BUTTON2);
-      Serial.printf("[input] initial CLK=%d DT=%d BTN_A=%d BTN_B=%d (all should read 1/HIGH if idle and wired correctly)\n",
-                    digitalRead(PIN_ENCODER_CLK), digitalRead(PIN_ENCODER_DT),
-                    digitalRead(PIN_ENCODER_BTN), digitalRead(PIN_BUTTON2));
+      Serial.printf("[input] CLK=GPIO%d DT=GPIO%d (native, interrupt driven)\n",
+                    PIN_ENCODER_CLK, PIN_ENCODER_DT);
+      Serial.printf("[input] PCF8575 0x%02X on SDA=GPIO%d SCL=GPIO%d: BTN_A=P%d JOY_UP=P%d JOY_DOWN=P%d JOY_LEFT=P%d JOY_RIGHT=P%d BTN_B=P%d\n",
+                    PCF8575_I2C_ADDR, PIN_I2C_SDA, PIN_I2C_SCL,
+                    EXP_PIN_ENCODER_BTN, EXP_PIN_JOY_UP, EXP_PIN_JOY_DOWN,
+                    EXP_PIN_JOY_LEFT, EXP_PIN_JOY_RIGHT, EXP_PIN_BUTTON2);
+      uint16_t initial = expanderState();
+      Serial.printf("[input] initial expander state = 0x%04X (bits for pins above should read 1/HIGH if idle and wired correctly)\n",
+                    initial);
     }
   }
 

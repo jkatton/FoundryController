@@ -1,0 +1,21 @@
+{
+  "id": "foundry-controller",
+  "title": "Controller Bridge (ESP8266 Controller)",
+  "description": "Connects this world to a self-hosted relay so an external device (e.g. an ESP8266 controller) can read and update character HP/temp HP and do moves and make circles without any third-party relay service.",
+  "version": "1.0.0",
+  "compatibility": {
+    "minimum": "11",
+    "verified": "12"
+  },
+  "authors": [
+    {
+      "name": "Jesse and Scary AI"
+    }
+  ],
+  "esmodules": [
+    "scripts/main.js",
+    "scripts/hp-bridge-sheet.js",
+    "scripts/settings.js"
+  ],
+  "socket": false
+}
