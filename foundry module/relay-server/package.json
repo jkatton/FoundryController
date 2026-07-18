@@ -1,0 +1,14 @@
+{
+  "name": "hp-bridge-relay",
+  "version": "1.0.0",
+  "description": "Self-hosted relay between the hp-bridge Foundry module and an external HTTP client (e.g. an ESP8266 HP monitor).",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.17.0"
+  }
+}
