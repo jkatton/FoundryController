@@ -40,13 +40,23 @@ enum class AppState {
 // still start out matching whatever config.h says until a settings.cfg
 // says otherwise.
 struct AppSettings {
-  uint8_t screenRotation = 2;                     // TFT_eSPI rotation, 0-3; 2 matches the display's previous hardcoded default
+  uint8_t screenRotation = 2;                     // TFT_eSPI rotation, 0-3; 2 matches the display's previous hardcoded default.
+                                                  // Also drives main.cpp's rotateForScreenRotation(), which remaps the four
+                                                  // physical joystick directions so "up" etc. always match what's visually
+                                                  // up/down/left/right on the rotated screen, rather than a fixed hardware axis.
   bool gaugeStyleFlat = true;                     // HP ring style: flat quantized bands (true) vs smooth gradient (false)
   bool serialDebug = false;          // verbose encoder/button/error prints to Serial
   bool relayTestMode = false;    // drive the UI from an in-RAM mock party instead of the real relay's HTTP surface
   float circleRadius = CIRCLE_RADIUS_DEFAULT; // last radius used for the circle (main.cpp's g_circleRadius) - persisted so
                                               // it carries over between reboots, but not part of the settings carousel
                                               // (SETTINGS_TABLE) since it's set live via the encoder in radius-editing itself
+  uint8_t tableOrientation = 0;                   // 0-3 quarter turns clockwise, same 0/90/180/270 convention as
+                                                  // screenRotation - rotates joystick move deltas before they're sent
+                                                  // to the relay (see main.cpp's rotateForTableOrientation()), to
+                                                  // compensate for the physical minis board being rotated relative to
+                                                  // the screen/joystick. Purely a move-command transform - unlike
+                                                  // screenRotation, changing it has no immediate on-screen effect to
+                                                  // live-preview.
 };
 
 // HP adjustment mode within the detail screen

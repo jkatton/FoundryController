@@ -11,8 +11,14 @@ plus one extra standalone push button ("Button B").
 
 - **Wemos D1 Mini** (ESP8266) board
 - Round 240x240 SPI LCD, **GC9A01 driver** (the common 1.28" round module)
-- Rotary encoder (KY-040 style, quadrature + push button)
+- Rotary encoder (KY-040 style, quadrature + push button + 4 way joystick)
 - One extra momentary push button
+
+TRACE MUST BE CUT ON D1 MINI TO ALLOW THE USE OF d0 pin for encoder (see photo).
+
+ONCE TRACE IS CUT, IN ORDER TO ENTER PROGRAMMING MODE PIN 0 (D3) MUST BE 
+SHORTED TO GND BEFORE RST BUTTON IS PRESSED
+
 
 ### Wiring (matches `include/config.h` / `platformio.ini` defaults)
 
@@ -20,18 +26,46 @@ The D1 Mini only exposes 9 usable digital GPIOs (D0-D8), and this project
 needs exactly that many — so the display backlight is wired straight to
 3V3 instead of through a GPIO; there's no pin to spare for it.
 
-| Signal              | D1 Mini label | GPIO |
-|---------------------|---------------|------|
-| Encoder CLK          | D1 | GPIO5 |
-| Encoder DT            | D2 | GPIO4 |
-| Encoder SW (Button A) | D3 | GPIO0 |
-| Button B               | D4 | GPIO2 |
-| TFT MOSI                | D7 | GPIO13 |
-| TFT SCLK                 | D5 | GPIO14 |
-| TFT CS                     | D8 | GPIO15 |
-| TFT DC                       | D6 | GPIO12 |
-| TFT RST                        | D0 | GPIO16 |
-| TFT Backlight                    | — | wire directly to **3V3** |
+// Rotary encoder (RKJXT1F42001)
+#define PIN_ENCODER_CLK     5   // D1
+#define PIN_ENCODER_DT      4   // D2
+
+// I2C bus to the PCF8575 expander
+
+#define PIN_I2C_SDA         0   // D3 - see constraint above re: USB auto-reset contention
+#define PIN_I2C_SCL         2   // D4 - external/onboard pull-up also satisfies boot-strap requirement
+
+// PCF8575 /INT - goes low when any expander input changes. Currently
+// unused (nothing calls digitalRead() on it - see InputManager.cpp) and
+// GPIO16 can't do attachInterrupt() anyway, so this is a plain polled
+// spare pin either way.
+#define PIN_EXPANDER_INT    16  // D0
+
+// TFT (GC9A01 round 240x240 SPI display) - these must also match the
+// build_flags in platformio.ini, which is what TFT_eSPI actually uses.
+#define PIN_TFT_MOSI        13   // D7 - fixed hardware SPI pin, do not move
+#define PIN_TFT_SCLK        14   // D5 - fixed hardware SPI pin, do not move
+#define PIN_TFT_CS          15   // D8
+#define PIN_TFT_DC          12   // D6
+#define PIN_TFT_RST         -1   // not used, doftware reset instead
+#define PIN_TFT_BL          -1   // tied directly to 3V3 - no spare GPIO for backlight control
+
+// =====================================================================
+// PCF8575 I2C EXPANDER
+// =====================================================================
+// 16 quasi-bidirectional I/O pins (P0-P15), used here for everything on
+// the controller that isn't timing-sensitive: the encoder's center push,
+// the RKJXT1F42001's 4-direction tilt switch, and the standalone Button
+// B. All are simple switch-to-GND closures, same debounce approach as
+// before (BUTTON_DEBOUNCE_MS) - just read over I2C instead of digitalRead().
+#define PCF8575_I2C_ADDR       0x20   // default address with all address pins tied low; adjust if wired differently
+
+#define EXP_PIN_ENCODER_BTN    0   // P0 - RKJXT1F42001 center push ("Button A")
+#define EXP_PIN_JOY_UP         2   // P1
+#define EXP_PIN_JOY_DOWN       1   // P2
+#define EXP_PIN_JOY_LEFT       4   // P3
+#define EXP_PIN_JOY_RIGHT      3   // P4
+#define EXP_PIN_BUTTON2        5   // P5 - standalone "Button B"
 
 Both buttons are wired active-low to GND with the internal `INPUT_PULLUP`
 resistors enabled in software — no external resistors needed. There's no

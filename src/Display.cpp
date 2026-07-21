@@ -79,6 +79,26 @@ namespace Display
 #define COL_TEMP 0x051F   // light blue for temp hp
 #define COL_CIRCLE 0xFBE0 // warm orange for the persistent circle-radius readout - distinct from temp hp's blue and the cyan accent
 
+// HP ring's inner radius (see showCharacterDetail()'s hpInnerR, which this
+// must be kept in sync with) - hoisted up here so drawTextRow() callers
+// below can compute how much horizontal room a row has before it runs
+// into the ring's visible band, without drawTextRow() itself needing to
+// know anything about the ring.
+static const int RING_INNER_R = 98;
+
+// The half-width (in px, centered on SCREEN_CX) of the HP/temp ring's
+// empty inner hole at a given vertical distance `absDy` from SCREEN_CY -
+// i.e. the widest a row can safely blank/draw at that height before its
+// left/right edges start eating into the ring's visible band instead of
+// just the empty background inside it. Returns 0 once absDy reaches the
+// ring's inner radius (no hole left at all at that height).
+static int ringHoleHalfWidth(int absDy)
+{
+  if (absDy >= RING_INNER_R)
+    return 0;
+  return (int)sqrtf((float)(RING_INNER_R * RING_INNER_R - absDy * absDy));
+}
+
 // Max characters per line when the character name is wrapped onto the two
 // name lines on the detail screen (see splitNameLines()). Override in
 // config.h if a project wants longer/shorter lines for a different font
@@ -320,8 +340,8 @@ namespace Display
 
     tft.setTextSize(1);
     tft.setTextColor(COL_DIM, COL_BG);
-    tft.drawString("click:next hold A:go", SCREEN_CX, 200);
-    tft.drawString("hold B: settings", SCREEN_CX, 215);
+    tft.drawString("<A>:next [A]:go", SCREEN_CX, 200);
+    tft.drawString("[B]:settings", SCREEN_CX, 215);
 
     if (fakery)
     {
@@ -385,8 +405,8 @@ namespace Display
     tft.setTextSize(1);
     tft.setTextColor(COL_DIM, COL_BG);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString("turn:change click:next", SCREEN_CX, 200);
-    tft.drawString("hold A:save hold B:back", SCREEN_CX, 215);
+    tft.drawString("(o):change <A>:next", SCREEN_CX, 200);
+    tft.drawString("[A]:save [B]:back", SCREEN_CX, 215);
   }
 
   void showCharacterList(const std::vector<Character> &chars, int selectedIndex)
@@ -470,8 +490,8 @@ namespace Display
     tft.setTextSize(1);
     tft.setTextColor(COL_DIM, COL_BG);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString("click: select", SCREEN_CX, 200);
-    tft.drawString("hold B: IP input", SCREEN_CX, 215);
+    tft.drawString("<A>: select", SCREEN_CX, 200);
+    tft.drawString("[B]: IP input", SCREEN_CX, 215);
 
     s_listValid = true;
     s_lastListChars = chars;
@@ -595,8 +615,19 @@ namespace Display
   // see the full-band pre-clear there for why a row whose offset can
   // change between calls needs extra care beyond what this function does
   // on its own.
+  //
+  // maxClearHalfWidth (default -1, meaning unclamped) caps how wide that
+  // blank rectangle is ever allowed to get, regardless of how wide either
+  // string measured. Rows that sit inside the HP ring's inner hole (the
+  // status-tip rows near the bottom of the screen) pass ringHoleHalfWidth()
+  // here, so a long tip string being replaced by a short one can't erase
+  // (and, via s_lastWidth, later re-erase) pixels out past the hole and
+  // into the ring's visible band. This only clamps the blanking rectangle,
+  // not the text itself - a string wider than its row's safe zone still
+  // draws at full width, so callers passing this should keep their
+  // strings short enough to actually fit within it.
   static void drawTextRow(DetailTextRow row, int y, int rowHeight, const String &s, uint8_t size, uint16_t color,
-                          bool forceRedraw = false, int xOffset = 0)
+                          bool forceRedraw = false, int xOffset = 0, int maxClearHalfWidth = -1)
   {
     static int s_lastWidth[ROW_COUNT] = {0};
     static String s_lastStr[ROW_COUNT];
@@ -621,6 +652,10 @@ namespace Display
     tft.setTextSize(size);
     int newWidth = (s.length() > 0) ? tft.textWidth(s) : 0;
     int clearWidth = max(newWidth, s_lastWidth[row]);
+    if (maxClearHalfWidth >= 0)
+    {
+      clearWidth = min(clearWidth, maxClearHalfWidth * 2);
+    }
 
     if (clearWidth > 0)
     {
@@ -753,7 +788,8 @@ namespace Display
 
     // HP ring (main gauge).
     const int hpOuterR = 114;
-    const int hpInnerR = 98;
+    const int hpInnerR = RING_INNER_R; // kept as one shared constant (see its own comment) since drawTextRow()'s
+                                       // maxClearHalfWidth calls below need to match this exactly
 
     // Temp HP ring: a slim accent ring just outside the HP ring. There's only
     // a few px of margin between the HP ring's outer edge and the visible
@@ -763,6 +799,15 @@ namespace Display
     // background on both sides to blend against, not the other ring's color.
     const int tempOuterR = 120;
     const int tempInnerR = 116;
+
+    // Safe half-widths for the two status-tip rows near the bottom of the
+    // screen (SCREEN_CY+65/+80) - both sit inside the HP ring's inner hole,
+    // which narrows the further down you go, so their drawTextRow() calls
+    // below pass these as maxClearHalfWidth to keep a long tip string being
+    // replaced by a short one from blanking out past the hole and into the
+    // ring's visible band (see ringHoleHalfWidth()'s comment).
+    const int statusRow1HalfWidth = ringHoleHalfWidth(65);
+    const int statusRow2HalfWidth = ringHoleHalfWidth(80);
 
     bool freshCharacter = (c.uuid != s_lastDetailUuid);
     if (freshCharacter)
@@ -943,13 +988,13 @@ namespace Display
 
       if (circle.sending)
       {
-        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Updating...", 1, COL_ACCENT, forceRowsRedraw);
+        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Updating...", 1, COL_ACCENT, forceRowsRedraw, 0, statusRow1HalfWidth);
       }
       else
       {
-        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "turn:radius", 1, COL_DIM, forceRowsRedraw);
+        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "<A>/<B>:back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
       }
-      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "B:clear hold:done", 1, COL_DIM, forceRowsRedraw);
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "[A]/[B]:draw", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
       return;
     }
 
@@ -969,13 +1014,13 @@ namespace Display
 
       if (move.sending)
       {
-        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Moving...", 1, COL_ACCENT, forceRowsRedraw);
+        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Moving...", 1, COL_ACCENT, forceRowsRedraw, 0, statusRow1HalfWidth);
       }
       else
       {
-        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "dir:nudge", 1, COL_DIM, forceRowsRedraw);
+        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "<A>:move [A]:back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
       }
-      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "click:send hold:cancel", 1, COL_DIM, forceRowsRedraw);
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "<B>:ring", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
       return;
     }
 
@@ -993,32 +1038,32 @@ namespace Display
     {
       if (addTarget == HpAddTarget::TEMP)
       {
-        drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, " " + deltaStr + " ", 4, COL_TEMP, forceRowsRedraw);
+        drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, deltaStr, 4, COL_TEMP, forceRowsRedraw);
       }
       else
       {
         if (pendingDelta == 0)
         {
-          drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, " " + deltaStr + " ", 4, COL_DIM, forceRowsRedraw);
+          drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, deltaStr, 4, COL_DIM, forceRowsRedraw);
         }
         else
         {
-          drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, " " + deltaStr + " ", 4, COL_HP_GOOD, forceRowsRedraw);
+          drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, deltaStr, 4, COL_HP_GOOD, forceRowsRedraw);
         }
       }
     }
     else if (pendingDelta < 0)
     {
-      drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, " " + deltaStr + " ", 4, COL_HP_BAD, forceRowsRedraw);
+      drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, deltaStr, 4, COL_HP_BAD, forceRowsRedraw);
     }
     else
     {
-      drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, "      ", 4, COL_DIM, forceRowsRedraw);
+      drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, " ", 4, COL_DIM, forceRowsRedraw);
     }
 
     if (sending)
     {
-      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Sending...", 1, COL_ACCENT, forceRowsRedraw);
+      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Sending...", 1, COL_ACCENT, forceRowsRedraw, 0, statusRow1HalfWidth);
       drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, " ", 1, COL_DIM, forceRowsRedraw);
     }
     else if (justSent)
@@ -1028,14 +1073,14 @@ namespace Display
     }
     else
     {
-      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "click:send hold:list", 1, COL_DIM, forceRowsRedraw);
+      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "<A>:send HP [A]:back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
       if (addTarget == HpAddTarget::TEMP)
       {
-        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "dbl:reg hp", 1, COL_DIM, forceRowsRedraw);
+        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "<AA>:reg hp", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
       }
       else
       {
-        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "dbl:temp hp", 1, COL_DIM, forceRowsRedraw);
+        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "<AA>:temp hp", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
       }
     }
   }

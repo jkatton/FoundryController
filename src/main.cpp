@@ -209,13 +209,92 @@ static String settingValueRelayTestMode(const AppSettings &s)
   return s.relayTestMode ? "On" : "Off";
 }
 
+static void settingApplyTableOrientation(AppSettings &s, int32_t delta)
+{
+  int v = ((int)s.tableOrientation + delta) % 4;
+  if (v < 0)
+    v += 4;
+  s.tableOrientation = (uint8_t)v;
+  // Purely a move-command transform applied at send time (see
+  // rotateForTableOrientation() below) - unlike screen rotation or gauge
+  // style, there's nothing on this screen itself to live-preview.
+}
+
+static String settingValueTableOrientation(const AppSettings &s)
+{
+  static const char *labels[4] = {"0", "90", "180", "270"};
+  return String(labels[s.tableOrientation & 0x03]) + " deg";
+}
+
 static const SettingDescriptor SETTINGS_TABLE[] = {
     {"Screen rotation", settingApplyRotation, settingValueRotation},
     {"HP gauge style", settingApplyGaugeStyle, settingValueGaugeStyle},
     {"Serial Debug Output", settingApplySerialDebug, settingValueSerialDebug},
     {"Local Relay Test Mode", settingApplyRelayTestMode, settingValueRelayTestMode},
+    {"Table Orientation", settingApplyTableOrientation, settingValueTableOrientation},
 };
 static const int SETTINGS_COUNT = sizeof(SETTINGS_TABLE) / sizeof(SETTINGS_TABLE[0]);
+
+// Rotates a (col, row) vector, in screen coordinates (col=+right,
+// row=+down), by `turns` 90-degree clockwise quarter turns (0-3). Shared
+// by rotateForScreenRotation() and rotateForTableOrientation() below -
+// both are the same quarter-turn transform, just triggered by different
+// settings and applied at different points in the move pipeline.
+static void rotateQuarterTurnsCW(int col, int row, uint8_t turns, int &outCol, int &outRow)
+{
+  switch (turns & 0x03)
+  {
+  case 1: // 90 deg clockwise
+    outCol = -row;
+    outRow = col;
+    break;
+  case 2: // 180 deg
+    outCol = -col;
+    outRow = -row;
+    break;
+  case 3: // 270 deg clockwise (90 deg counter-clockwise)
+    outCol = row;
+    outRow = -col;
+    break;
+  default: // 0 deg
+    outCol = col;
+    outRow = row;
+    break;
+  }
+}
+
+// Remaps a physical joystick direction press (e.g. joyUp -> (0,-1)) into
+// the logical (dCol, dRow) grid delta the rest of the move pipeline
+// works with, compensating for the currently-applied
+// g_settings.screenRotation so the four physical presses always match
+// whatever is visually up/down/left/right on the (possibly rotated)
+// screen, rather than a fixed hardware axis. screenRotation's units (0-3
+// quarter turns) are the same ones passed to Display::setRotation(), so
+// this uses g_settings (the saved/applied value) rather than
+// g_settingsDraft - a rotation only being previewed on the settings
+// screen shouldn't yet change how the detail screen's buttons behave.
+// The result of this feeds nudgeMove(), so it's what accumulates into
+// g_moveDCol/g_moveDRow and shows up in the on-screen arrows - table
+// orientation (rotateForTableOrientation()) is a second, independent
+// rotation applied after this one, only to what's sent to the relay.
+static void rotateForScreenRotation(int col, int row, int &outCol, int &outRow)
+{
+  rotateQuarterTurnsCW(col, row, g_settings.screenRotation, outCol, outRow);
+}
+
+// Rotates a joystick-accumulated (dCol, dRow) delta by g_settings.tableOrientation
+// quarter turns clockwise, in screen coordinates (col=+right, row=+down),
+// before it's sent to the relay as a move command - see
+// AppSettings::tableOrientation's own comment for why. Only ever applied
+// to what's actually transmitted (see sendMovePreview()) - the on-screen
+// accumulated g_moveDCol/g_moveDRow (arrows, distance-so-far) always
+// reflect the screen-rotation-compensated presses (see
+// rotateForScreenRotation()), not this second rotation, since that's what
+// the user actually intended by pressing that direction.
+static void rotateForTableOrientation(int dCol, int dRow, int &outCol, int &outRow)
+{
+  rotateQuarterTurnsCW(dCol, dRow, g_settings.tableOrientation, outCol, outRow);
+}
 
 static void renderSettingsScreen()
 {
@@ -617,8 +696,16 @@ static void sendMovePreview()
   g_moveSending = true;
   Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false, currentMoveIndicator(), currentCircleIndicator());
 
+  // g_moveDCol/g_moveDRow are the raw, unrotated running total in screen
+  // terms (what the joystick actually accumulated, and what's shown on
+  // screen) - rotateForTableOrientation() only transforms the copy that
+  // actually goes out over the wire, so the on-screen arrows/distance
+  // keep matching what the user pressed regardless of table orientation.
+  int sendDCol, sendDRow;
+  rotateForTableOrientation(g_moveDCol, g_moveDRow, sendDCol, sendDRow);
+
   RelayClient::MovePreviewResult result;
-  bool ok = RelayClient::previewMoveRelative(g_activeChar.uuid, g_moveDCol, g_moveDRow, result);
+  bool ok = RelayClient::previewMoveRelative(g_activeChar.uuid, sendDCol, sendDRow, result);
 
   g_moveSending = false;
 
@@ -973,25 +1060,35 @@ static void handleCharacterDetail()
   // nudges - InputManager's pollJoy*() never classifies a direction as
   // LONG_PRESS/DOUBLE_PRESS or holds it back to check (see
   // InputManager.h), so a nonzero event here always means "just pressed,
-  // right now."
+  // right now." Each physical direction is remapped by
+  // rotateForScreenRotation() before reaching nudgeMove(), so "up" always
+  // nudges whatever's visually up on the (possibly rotated) screen.
   if (joyUp != ButtonEvent::NONE || joyUpRepeat)
   {
-    nudgeMove(0, -1);
+    int dCol, dRow;
+    rotateForScreenRotation(0, -1, dCol, dRow);
+    nudgeMove(dCol, dRow);
     return;
   }
   if (joyDown != ButtonEvent::NONE || joyDownRepeat)
   {
-    nudgeMove(0, 1);
+    int dCol, dRow;
+    rotateForScreenRotation(0, 1, dCol, dRow);
+    nudgeMove(dCol, dRow);
     return;
   }
   if (joyLeft != ButtonEvent::NONE || joyLeftRepeat)
   {
-    nudgeMove(-1, 0);
+    int dCol, dRow;
+    rotateForScreenRotation(-1, 0, dCol, dRow);
+    nudgeMove(dCol, dRow);
     return;
   }
   if (joyRight != ButtonEvent::NONE || joyRightRepeat)
   {
-    nudgeMove(1, 0);
+    int dCol, dRow;
+    rotateForScreenRotation(1, 0, dCol, dRow);
+    nudgeMove(dCol, dRow);
     return;
   }
 
