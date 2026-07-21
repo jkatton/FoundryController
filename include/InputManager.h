@@ -38,12 +38,29 @@ int32_t readEncoderDelta(EncoderProfile profile = EncoderProfile::NORMAL);
   ButtonEvent pollButtonA(); // RKJXT1F42001 center push (PCF8575 P0)
   ButtonEvent pollButtonB(); // standalone second button (PCF8575 P5)
 
-  // RKJXT1F42001 4-direction tilt switch (PCF8575 P1-P4). Same debounced
-  // short/long/double-press machine as the buttons above - e.g. a
-  // long-press-left is a perfectly valid event if a screen wants one.
+  // RKJXT1F42001 4-direction tilt switch (PCF8575 P1-P4). Unlike the
+  // buttons above, directions are always instant, single-shot presses -
+  // there's no long-press or double-press meaning for a direction, so
+  // these skip that debounced classification machine entirely (no
+  // pairing wait before reporting a press, no long-press timer). Only
+  // ever returns SHORT_PRESS (the instant a press debounces) or NONE.
   ButtonEvent pollJoyUp();
   ButtonEvent pollJoyDown();
   ButtonEvent pollJoyLeft();
   ButtonEvent pollJoyRight();
+
+  // Press-and-hold auto-repeat, for continuous movement while a direction
+  // is held rather than one nudge per physical press. Returns true once
+  // every MOVE_REPEAT_INTERVAL_MS (config.h) after a direction has been
+  // held past MOVE_REPEAT_DELAY_MS; false otherwise, including on the
+  // initial press itself (that first nudge is still the caller's job via
+  // the SHORT_PRESS from pollJoyUp() etc. above). Independent of the
+  // short/long/double-press machine - call both every tick for a given
+  // direction; this neither consumes nor is affected by the other's
+  // result.
+  bool pollJoyUpRepeat();
+  bool pollJoyDownRepeat();
+  bool pollJoyLeftRepeat();
+  bool pollJoyRightRepeat();
 
 }

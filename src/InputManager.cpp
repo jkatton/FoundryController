@@ -148,6 +148,23 @@ namespace InputManager
     return (uint16_t)lo | ((uint16_t)hi << 8);
   }
 
+  // Unlike pcf8575Read(), which deliberately can't be told apart from a
+  // genuinely-idle expander (both cases return 0xFFFF - see its comment),
+  // this checks the actual Wire.requestFrom() result directly, so callers
+  // that specifically need to know "is anything out there responding" -
+  // i.e. init-time retry logic in begin() - have a real answer instead of
+  // an ambiguous one.
+  static bool pcf8575Ping()
+  {
+    if (Wire.requestFrom((uint8_t)PCF8575_I2C_ADDR, (uint8_t)2) != 2)
+    {
+      return false;
+    }
+    Wire.read();
+    Wire.read();
+    return true;
+  }
+
   // One I2C transaction covers all six pins we care about, so every
   // pollButton*()/pollJoy*() call in a given loop() iteration shares a
   // single read instead of hitting the bus once per pin. PIN_EXPANDER_INT
@@ -159,12 +176,47 @@ namespace InputManager
   static unsigned long s_expanderCacheMs = 0;
   static bool s_expanderCacheValid = false;
 
+  // Whether the PCF8575 has ever successfully answered a ping. begin()'s
+  // own retry loop gives it ~450ms at boot; if that's not enough (cold
+  // boot, expander still settling), this used to stay false for the rest
+  // of the session with nothing ever trying again - the only way to get
+  // working buttons was a full reset (which is exactly what opening a
+  // serial monitor forces via the USB adapter's DTR/RTS auto-reset, which
+  // is why "buttons work once I open the monitor" was the symptom rather
+  // than a coincidence). Retried quietly here instead, at a slow cadence,
+  // for as long as it takes - no reset required. Deliberately only ever
+  // goes through pcf8575Write()/pcf8575Ping() (the normal Wire API) - see
+  // the big comment above begin() for why raw SDA/SCL pin manipulation is
+  // specifically the wrong move on this board.
+  static bool s_expanderReady = false;
+  static unsigned long s_lastExpanderRetryMs = 0;
+  static const unsigned long EXPANDER_RETRY_INTERVAL_MS = 250;
+
   static uint16_t expanderState()
   {
     unsigned long now = millis();
+
+    if (!s_expanderReady && (now - s_lastExpanderRetryMs) >= EXPANDER_RETRY_INTERVAL_MS)
+    {
+      s_lastExpanderRetryMs = now;
+      pcf8575Write(0xFFFF); // re-assert input-with-pullup mode on every pin before trusting a read
+      if (pcf8575Ping())
+      {
+        s_expanderReady = true;
+        if (s_debugEnabled)
+        {
+          Serial.println("[input] PCF8575 responded - buttons/joystick now live (no reset needed)");
+        }
+      }
+    }
+
     if (!s_expanderCacheValid || now != s_expanderCacheMs)
     {
-      s_expanderCache = pcf8575Read();
+      // While not yet ready, don't even attempt pcf8575Read() - pcf8575Ping()
+      // above already owns the "is it there yet" question at a throttled
+      // cadence; a bare failed read here would just be a second, redundant
+      // bus transaction every single loop() iteration until recovery.
+      s_expanderCache = s_expanderReady ? pcf8575Read() : 0xFFFF;
       s_expanderCacheMs = now;
       s_expanderCacheValid = true;
     }
@@ -188,6 +240,7 @@ namespace InputManager
     bool awaitingSecondClick = false;      // a short-press release is pending,
                                            // waiting to see if a second click follows
     unsigned long firstClickReleaseMs = 0; // when that pending release happened
+    unsigned long lastRepeatMs = 0;        // 0 = not currently auto-repeating; see pollButtonRepeat()
   };
 
   static ButtonState s_btnA;
@@ -280,10 +333,119 @@ namespace InputManager
   ButtonEvent pollButtonA() { return pollButton(s_btnA); }
   ButtonEvent pollButtonB() { return pollButton(s_btnB); }
 
-  ButtonEvent pollJoyUp() { return pollButton(s_joyUp); }
-  ButtonEvent pollJoyDown() { return pollButton(s_joyDown); }
-  ButtonEvent pollJoyLeft() { return pollButton(s_joyLeft); }
-  ButtonEvent pollJoyRight() { return pollButton(s_joyRight); }
+  // Direction switches (joystick tilt) are always instant, single-shot
+  // presses - unlike buttons A/B, there's no long-press or double-press
+  // meaning on a direction, so this doesn't run through pollButton()'s
+  // debounced short/long/double-press machine at all. In particular it
+  // never holds a release back to see if a second click follows
+  // (awaitingSecondClick's DOUBLE_CLICK_WINDOW_MS wait) and never starts
+  // a long-press timer - it just reports SHORT_PRESS the instant the
+  // debounced state flips to pressed, one event per physical press, with
+  // none of that added latency. It still updates the same
+  // debouncedState/pressStartMs fields pollButton() would have, so
+  // pollButtonRepeat() (press-and-hold auto-repeat, used for these same
+  // four directions) keeps working unchanged.
+  static ButtonEvent pollDirection(ButtonState &btn)
+  {
+    bool raw = (expanderState() >> btn.expBit) & 0x01;
+    unsigned long now = millis();
+
+    if (raw != btn.lastRawState)
+    {
+      if (s_debugEnabled)
+      {
+        Serial.printf("[input P%d] raw -> %s\n", btn.expBit, raw ? "HIGH" : "LOW");
+      }
+      btn.lastChangeMs = now;
+      btn.lastRawState = raw;
+    }
+
+    if ((now - btn.lastChangeMs) > BUTTON_DEBOUNCE_MS && raw != btn.debouncedState)
+    {
+      btn.debouncedState = raw;
+      if (btn.debouncedState == LOW)
+      {
+        // Just pressed - report it right away. (Release isn't reported
+        // at all; a direction only ever fires on press, same as before.)
+        btn.pressStartMs = now;
+        if (s_debugEnabled)
+        {
+          Serial.printf("[input P%d] SHORT_PRESS (instant, direction)\n", btn.expBit);
+        }
+        return ButtonEvent::SHORT_PRESS;
+      }
+    }
+
+    return ButtonEvent::NONE;
+  }
+
+  ButtonEvent pollJoyUp() { return pollDirection(s_joyUp); }
+  ButtonEvent pollJoyDown() { return pollDirection(s_joyDown); }
+  ButtonEvent pollJoyLeft() { return pollDirection(s_joyLeft); }
+  ButtonEvent pollJoyRight() { return pollDirection(s_joyRight); }
+
+  // Press-and-hold auto-repeat. Reads btn.debouncedState/pressStartMs,
+  // which pollButton() above is responsible for keeping current - callers
+  // must poll the matching pollJoy*() every tick regardless of whether
+  // its return value is used, same requirement as the rest of this file.
+  //
+  // lastRepeatMs doing double duty as "haven't started repeating yet"
+  // (0) and "timestamp of the last repeat fired" is safe here because a
+  // genuine repeat timestamp of exactly 0 would require millis() to have
+  // wrapped back to 0 at the exact instant a repeat fired - not worth a
+  // separate bool for.
+  static bool pollButtonRepeat(ButtonState &btn)
+  {
+    unsigned long now = millis();
+
+    if (btn.debouncedState != LOW)
+    {
+      btn.lastRepeatMs = 0; // released (or never pressed) - next press starts a fresh delay
+      return false;
+    }
+
+    unsigned long heldFor = now - btn.pressStartMs;
+    if (heldFor < MOVE_REPEAT_DELAY_MS)
+    {
+      return false;
+    }
+
+    if (btn.lastRepeatMs == 0)
+    {
+      // Anchor the first repeat to pressStartMs + delay, not to "now" -
+      // otherwise the first repeat's gap from the initial press would be
+      // delay + (however late this particular tick happened to land),
+      // and every repeat after it would inherit that same drift.
+      btn.lastRepeatMs = btn.pressStartMs + MOVE_REPEAT_DELAY_MS;
+    }
+
+    if (now - btn.lastRepeatMs < MOVE_REPEAT_INTERVAL_MS)
+    {
+      return false;
+    }
+
+    btn.lastRepeatMs = now;
+    if (s_debugEnabled)
+    {
+      Serial.printf("[input P%d] REPEAT (held %lums)\n", btn.expBit, heldFor);
+    }
+    return true;
+  }
+
+  bool pollJoyUpRepeat() { return pollButtonRepeat(s_joyUp); }
+  bool pollJoyDownRepeat() { return pollButtonRepeat(s_joyDown); }
+  bool pollJoyLeftRepeat() { return pollButtonRepeat(s_joyLeft); }
+  bool pollJoyRightRepeat() { return pollButtonRepeat(s_joyRight); }
+
+  // Best-effort I2C bus recovery, run before Wire.begin() claims the pins.
+  // If a previous session ended mid-transaction (e.g. a reset while a
+  // transfer was in flight, or the PCF8575 wasn't fully powered up yet
+  // when an earlier transaction hit it on a cold boot), a bit-banged I2C
+  // bus can get left with SDA stuck low - the classic symptom being every
+  // transaction failing silently forever afterward, until something
+  // forces a clean re-init.
+  //
+
 
   void begin()
   {
@@ -301,8 +463,43 @@ namespace InputManager
 
     // Quasi-bidirectional PCF8575: writing 1 to every pin is what puts them
     // all in input-with-pull-up mode (also the power-on default, but made
-    // explicit here rather than relied upon).
-    pcf8575Write(0xFFFF);
+    // explicit here rather than relied upon). Retried with verification
+    // (pcf8575Ping(), not pcf8575Read() - see its comment on why that
+    // distinction matters here) rather than fired once and assumed to have
+    // worked: on a cold power-on, GPIO0/GPIO2 doubling as both I2C pins and
+    // boot-strap pins means the PCF8575's own power/reset sequencing can
+    // still be settling by the time this runs, even after setup()'s
+    // earlier delay(200). A handful of retries with a short pause between
+    // them covers that without needing a guessed-at fixed delay - and a
+    // warm reset (e.g. triggered by a serial monitor's DTR/RTS toggle,
+    // which only resets the MCU, not the already-stable rest of the
+    // board) never hits this race in the first place, which is the
+    // telltale sign of this exact issue.
+    bool expanderReady = false;
+    for (int attempt = 0; attempt < 5 && !expanderReady; attempt++)
+    {
+      pcf8575Write(0xFFFF);
+      expanderReady = pcf8575Ping();
+      if (!expanderReady)
+        delay(50);
+    }
+    s_expanderReady = expanderReady;
+    s_lastExpanderRetryMs = millis();
+    if (!expanderReady)
+    {
+      // Printed unconditionally (not gated on s_debugEnabled) since this
+      // is worth surfacing even with debug output off. No longer a
+      // permanent condition, though - expanderState() keeps retrying
+      // pcf8575Ping() quietly every EXPANDER_RETRY_INTERVAL_MS from here
+      // on, so buttons/joystick will start working on their own as soon
+      // as the expander answers, with no reset required. If this message
+      // is followed by "PCF8575 responded" a few seconds later, that's
+      // just slow expander/bus settling on cold power-on and nothing to
+      // worry about; if it never recovers, check wiring/power to the
+      // expander and the pull-ups on SDA/SCL.
+      Serial.println("[input] WARNING: PCF8575 did not respond during init after 5 attempts - "
+                     "will keep retrying in the background.");
+    }
 
     s_btnA.expBit = EXP_PIN_ENCODER_BTN;
     s_btnB.expBit = EXP_PIN_BUTTON2;
@@ -324,6 +521,7 @@ namespace InputManager
                     PCF8575_I2C_ADDR, PIN_I2C_SDA, PIN_I2C_SCL,
                     EXP_PIN_ENCODER_BTN, EXP_PIN_JOY_UP, EXP_PIN_JOY_DOWN,
                     EXP_PIN_JOY_LEFT, EXP_PIN_JOY_RIGHT, EXP_PIN_BUTTON2);
+      Serial.printf("[input] expander responded to init ping: %s\n", expanderReady ? "yes" : "no");
       uint16_t initial = expanderState();
       Serial.printf("[input] initial expander state = 0x%04X (bits for pins above should read 1/HIGH if idle and wired correctly)\n",
                     initial);

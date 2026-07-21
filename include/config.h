@@ -30,23 +30,39 @@
 // native pin for I2C without needing to put anything timing-sensitive
 // on the expander.
 //
-// Two hard constraints on the ESP8266, unlike the ESP32:
+// Three hard constraints on the ESP8266, unlike the ESP32:
 //  1. SPI MOSI/SCLK are NOT freely reassignable - hardware SPI only works
 //     on GPIO13 (MOSI/D7) and GPIO14 (SCLK/D5). TFT_MOSI/TFT_SCLK below
 //     must stay on those pins.
-//  2. GPIO16 (D0) has no interrupt support and no usable internal
-//     pull-up. It's used here for the PCF8575's /INT line, but that
-//     means /INT must be polled (digitalRead in the main loop) rather
-//     than handled via attachInterrupt - GPIO16 can't do the latter.
+//  2. GPIO16 (D0) lives in the RTC/deep-sleep hardware block rather
+//     than the normal GPIO matrix, and - confirmed by direct testing on
+//     this board, not just datasheet theory - the Arduino Wire library
+//     simply cannot drive it for I2C, as either SDA or SCL. Used here
+//     only for the (currently unused/spare) PCF8575 /INT line, which
+//     just needs plain digitalRead() - no interrupt, no I2C.
+//  3. GPIO0 (D3) is wired, on most USB-serial adapter boards, into the
+//     auto-reset circuit that the flashing tool uses to force bootloader
+//     mode (driven via the adapter's RTS line through a transistor).
+//     Whenever nothing has the COM port open, that transistor commonly
+//     idles in the conducting state, holding GPIO0 low continuously -
+//     which would be fatal to I2C on this pin if true. This is the
+//     leading theory for why I2C here has worked only while a serial
+//     monitor is attached, but as of this writing it's still pending
+//     confirmation with a multimeter (checking D3's voltage with the
+//     monitor open vs. closed) before treating it as settled - flagged
+//     here rather than silently assumed. If confirmed, the actual fix
+//     is a small hardware mod disabling that auto-reset connection
+//     (trades away one-click auto-flash for a manual boot-button
+//     sequence), not a firmware workaround - the external transistor
+//     can't be out-retried by software.
 //
-// D3 (GPIO0) and D4 (GPIO2) are boot-strapping pins - they must read HIGH
-// at power-on/reset for the board to boot normally. They're used here for
-// I2C SDA/SCL, which works out nicely: I2C requires pull-up resistors on
-// both lines (either external ~4.7k or built into most PCF8575 breakout
-// boards), and those pull-ups naturally hold the lines HIGH at boot,
-// satisfying the boot-strap requirement the same way the old buttons'
-// INPUT_PULLUP did. As before: don't power on mid-press of anything that
-// could pull these low.
+// D4 (GPIO2) is a boot-strapping pin - it must read HIGH at power-on/
+// reset for the board to boot normally. It's used here for I2C SCL,
+// which works out nicely: I2C requires a pull-up resistor on the line
+// (either external ~4.7k or built into most PCF8575 breakout boards),
+// and that pull-up naturally holds the line HIGH at boot, satisfying the
+// boot-strap requirement the same way the old buttons' INPUT_PULLUP did.
+// As before: don't power on mid-press of anything that could pull it low.
 
 // Rotary encoder (KY-040-style quadrature phases, now from the
 // RKJXT1F42001 rather than a standalone encoder)
@@ -54,12 +70,22 @@
 #define PIN_ENCODER_DT      4   // D2
 
 // I2C bus to the PCF8575 expander
-#define PIN_I2C_SDA         0   // D3 - external/onboard pull-up also satisfies boot-strap requirement
+//
+// SDA=GPIO0/SCL=GPIO2 is the original pairing, confirmed by direct
+// testing to be the only combination on this board that actually talks
+// to the PCF8575 at all - a detour through GPIO16 for either line was
+// tried and confirmed dead (see constraint #2 above), and GPIO0 alone
+// is not swappable for GPIO16 either, for the same reason. So this pair
+// stays, and the remaining "only works with a monitor attached" issue
+// (constraint #3 above) needs to be solved by fixing GPIO0's contention
+// at its source rather than avoiding the pin.
+#define PIN_I2C_SDA         0   // D3 - see constraint #3 above re: USB auto-reset contention
 #define PIN_I2C_SCL         2   // D4 - external/onboard pull-up also satisfies boot-strap requirement
 
-// PCF8575 /INT - goes low when any expander input changes. GPIO16 can't
-// do attachInterrupt(), so this must be polled with digitalRead() rather
-// than used as a true interrupt.
+// PCF8575 /INT - goes low when any expander input changes. Currently
+// unused (nothing calls digitalRead() on it - see InputManager.cpp) and
+// GPIO16 can't do attachInterrupt() anyway, so this is a plain polled
+// spare pin either way.
 #define PIN_EXPANDER_INT    16  // D0
 
 // TFT (GC9A01 round 240x240 SPI display) - these must also match the
@@ -108,9 +134,39 @@
 // reliable - 250-350ms is typical for a deliberate double-click.
 #define DOUBLE_CLICK_WINDOW_MS 300
 
+// Press-and-hold auto-repeat for the joystick directions (used by move
+// mode - see main.cpp's nudgeMove()/nudgeMoveDuringCircleMode() - to add
+// movement continuously while a direction is held rather than requiring
+// one press per cell). REPEAT_DELAY is how long a direction must be held
+// before repeating starts; REPEAT_INTERVAL is the gap between repeats
+// after that. Kept slower than a typical keyboard repeat since each
+// repeat fires a blocking network preview call (see sendMovePreview()) -
+// too fast and holding a direction floods the relay with requests instead
+// of smoothly stepping the preview.
+#define MOVE_REPEAT_DELAY_MS    500
+#define MOVE_REPEAT_INTERVAL_MS 250
+
 
 // pre-fill the Port the relay server listens on (default is 8787).
 #define RELAY_DEFAULT_PORT 8787
+
+// Circle mode (opened with a held Button B from the character detail
+// screen - see main.cpp's g_circleMode): encoder step size and bounds for
+// the radius, in the scene's own distance units (feet, meters, ...).
+// Defaults match dnd5e's typical 5ft grid squares / spell radius
+// increments.
+#define CIRCLE_RADIUS_STEP     5
+#define CIRCLE_RADIUS_MIN      5
+#define CIRCLE_RADIUS_MAX      240
+#define CIRCLE_RADIUS_DEFAULT  60
+
+// How long the encoder must sit still after a radius change before that
+// radius actually gets pushed to the relay as a live preview - each
+// encoder tick still updates the on-screen number immediately, but the
+// (blocking, network-round-trip) preview send is coalesced to fire once
+// after things settle, rather than once per tick while spinning fast.
+#define CIRCLE_RADIUS_DEBOUNCE_MS 100
+
 
 
 // LittleFS path used to remember the relay address across reboots

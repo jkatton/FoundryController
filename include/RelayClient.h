@@ -52,10 +52,22 @@ namespace RelayClient {
   // Sets a target grid cell (col, row) for a character's token and reports
   // the distance to it - mirrors hovering a drag before dropping it.
   // Nothing moves yet. Follow up with confirmMove() to commit it, or
-  // cancelMove() to discard it. timeoutMs is optional (0 = use the
-  // relay/module's own default); after it elapses server-side, the pending
-  // target is discarded automatically if never confirmed.
+  // cancelMove() to discard it. timeoutMs is optional: 0 (the default)
+  // means no timeout - the preview then stays on the map indefinitely
+  // until confirmed/cancelled. Pass a nonzero value to have the relay
+  // auto-discard the pending target after that many ms if it's never
+  // confirmed.
   bool previewMove(const String &uuid, int col, int row, MovePreviewResult &out, uint32_t timeoutMs = 0);
+
+  // Same idea as previewMove(), but the target is expressed as an offset
+  // (dCol, dRow) from the token's actual current position rather than an
+  // absolute cell - for callers that don't know the token's absolute
+  // position, like a joystick nudging it one cell at a time. The relay
+  // always computes this against the token's real (unmoved) position, so
+  // it's safe (and expected) to resend the *total* accumulated offset on
+  // every nudge rather than tracking a running absolute target yourself.
+  // Same timeoutMs semantics as previewMove() above (0 = no timeout).
+  bool previewMoveRelative(const String &uuid, int dCol, int dRow, MovePreviewResult &out, uint32_t timeoutMs = 0);
 
   // Commits whichever target the last previewMove() call set for this
   // uuid. Fails if there's no pending target (never previewed, already
@@ -72,9 +84,30 @@ namespace RelayClient {
   // square). color is a CSS hex string like "#ff0000" (empty = relay's
   // default). durationMs > 0 makes the template self-delete after that
   // delay instead of persisting. outTemplateId (if provided) receives the
-  // created template's id.
+  // created template's id. Implicitly clears any live preview from
+  // previewCircle() below - no need to call cancelCirclePreview() first.
   bool createCircle(const String &uuid, float radius = 0, const String &color = "",
                      uint32_t durationMs = 0, String *outTemplateId = nullptr);
+
+  // Live, local-only preview of a circle's radius centered on a
+  // character's token - renders identically to a confirmed circle
+  // (createCircle(), including the highlighted/hatched grid squares) on
+  // whichever relay-side client is viewing the token's scene, without
+  // touching any real document. Safe (and expected) to call repeatedly as
+  // a radius is dialed in, e.g. from a physical controller's circle mode -
+  // each call replaces the previous preview rather than stacking. Follow
+  // up with createCircle() to commit it as a real, persistent template, or
+  // cancelCirclePreview() to discard it. timeoutMs is optional: 0 (the
+  // default) means no timeout - the preview then stays on the map
+  // indefinitely until committed/discarded. Pass a nonzero value to have
+  // the relay auto-discard the preview after that many ms if never
+  // followed up on.
+  bool previewCircle(const String &uuid, float radius = 0, const String &color = "", uint32_t timeoutMs = 0);
+
+  // Discards the live preview set by previewCircle() for this uuid,
+  // without creating anything. outCleared (if provided) reports whether
+  // there was actually a preview to discard.
+  bool cancelCirclePreview(const String &uuid, bool *outCleared = nullptr);
 
   String lastError();
 

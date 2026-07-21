@@ -12,20 +12,33 @@
  *                                Monitor" in Foundry, full data, in one
  *                                response.
  *   POST /characters/update   -> update one of those characters' hp/tempHp.
- *   POST /tokens/move         -> preview-only: set a target {col, row} for
- *                                a character's token and get back the
- *                                distance to it. Doesn't move anything yet
- *                                - mirrors hovering a drag before dropping
- *                                it. Must be followed by a call to
- *                                /tokens/move/confirm to actually commit it.
+ *   POST /tokens/move         -> preview-only: set a target for a
+ *                                character's token (absolute {col, row}
+ *                                or relative {dCol, dRow}) and get back
+ *                                the distance to it. Doesn't move
+ *                                anything yet - mirrors hovering a drag
+ *                                before dropping it. Must be followed by
+ *                                a call to /tokens/move/confirm to
+ *                                actually commit it.
  *   POST /tokens/move/confirm -> commit the target set by the last
  *                                /tokens/move call for a given uuid.
  *   POST /tokens/move/cancel  -> discard the pending target set by
  *                                /tokens/move for a given uuid.
- *   POST /tokens/circle       -> drop a circular map template centered on
- *                                a character's token, optionally
- *                                self-deleting after durationMs.
- *   GET  /healthz              -> liveness + whether a Foundry world is linked.
+ *   POST /tokens/circle         -> drop a real, persistent circular map
+ *                                 template centered on a character's
+ *                                 token, optionally self-deleting after
+ *                                 durationMs. Implicitly clears any live
+ *                                 preview from /tokens/circle/preview.
+ *   POST /tokens/circle/preview -> live, local-only preview of a circle's
+ *                                 radius - draws (or redraws in place) on
+ *                                 whichever client is viewing the token's
+ *                                 scene, without touching any real
+ *                                 document. Safe to call repeatedly as a
+ *                                 radius is dialed in.
+ *   POST /tokens/circle/cancel  -> discard the live preview set by
+ *                                 /tokens/circle/preview for a given uuid,
+ *                                 without creating anything.
+ *   GET  /healthz                -> liveness + whether a Foundry world is linked.
  *
  * NOTE: authentication has been removed. Anyone who can reach this
  * server on the network can read/update characters and can connect as
@@ -203,22 +216,29 @@ app.post("/characters/update", async (req, res) => {
   }
 });
 
-// Preview-only move: sets a target grid cell for a character's token and
-// reports the distance to it, without moving anything yet. Follow up with
+// Preview-only move: sets a target for a character's token and reports
+// the distance to it, without moving anything yet. Follow up with
 // /tokens/move/confirm to commit, or /tokens/move/cancel to discard.
+// Target is either absolute {"col":4,"row":2} or relative {"dCol":1,"dRow":0}
+// (an offset from the token's actual current position - safe to resend as
+// a running total on every call, e.g. from a joystick that doesn't know
+// the token's absolute position). If both are given, absolute wins.
 // Body: {"uuid":"...", "col":4, "row":2, "timeoutMs":15000}
+// Body: {"uuid":"...", "dCol":1, "dRow":0, "timeoutMs":15000}
 app.post("/tokens/move", async (req, res) => {
-  const { uuid, col, row, timeoutMs } = req.body || {};
+  const { uuid, col, row, dCol, dRow, timeoutMs } = req.body || {};
   if (!uuid) {
     res.status(400).json({ error: "missing uuid in body" });
     return;
   }
-  if (col === undefined && row === undefined) {
-    res.status(400).json({ error: "must provide col and/or row in body" });
+  const hasAbsolute = col !== undefined || row !== undefined;
+  const hasRelative = dCol !== undefined || dRow !== undefined;
+  if (!hasAbsolute && !hasRelative) {
+    res.status(400).json({ error: "must provide col/row or dCol/dRow in body" });
     return;
   }
   try {
-    const result = await callFoundry("move", { uuid, col, row, timeoutMs });
+    const result = await callFoundry("move", { uuid, col, row, dCol, dRow, timeoutMs });
     if (!result.ok) {
       res.status(502).json({ error: result.error || "move preview failed" });
       return;
@@ -285,6 +305,53 @@ app.post("/tokens/circle", async (req, res) => {
       return;
     }
     res.json({ ok: true, templateId: result.templateId, sceneId: result.sceneId });
+  } catch (err) {
+    res.status(504).json({ error: String(err.message || err) });
+  }
+});
+
+// Live, local-only preview of a circle's radius - draws (or redraws in
+// place) on whichever client is viewing the token's scene, without
+// touching any real document. Safe to call repeatedly as a radius is
+// dialed in (e.g. from a physical controller's circle mode); each call
+// replaces the previous preview. Follow up with /tokens/circle to commit
+// it as a real, persistent template (which implicitly clears this
+// preview), or /tokens/circle/cancel to discard it.
+// Body: {"uuid":"...", "radius":10, "color":"#ff0000", "timeoutMs":15000}
+app.post("/tokens/circle/preview", async (req, res) => {
+  const { uuid, radius, color, timeoutMs } = req.body || {};
+  if (!uuid) {
+    res.status(400).json({ error: "missing uuid in body" });
+    return;
+  }
+  try {
+    const result = await callFoundry("circlePreview", { uuid, radius, color, timeoutMs });
+    if (!result.ok) {
+      res.status(502).json({ error: result.error || "circle preview failed" });
+      return;
+    }
+    res.json({ ok: true, preview: result.preview });
+  } catch (err) {
+    res.status(504).json({ error: String(err.message || err) });
+  }
+});
+
+// Discards the live preview set by /tokens/circle/preview for this uuid,
+// without creating anything.
+// Body: {"uuid":"..."}
+app.post("/tokens/circle/cancel", async (req, res) => {
+  const { uuid } = req.body || {};
+  if (!uuid) {
+    res.status(400).json({ error: "missing uuid in body" });
+    return;
+  }
+  try {
+    const result = await callFoundry("circleCancel", { uuid });
+    if (!result.ok) {
+      res.status(502).json({ error: result.error || "circle cancel failed" });
+      return;
+    }
+    res.json({ ok: true, cleared: result.cleared });
   } catch (err) {
     res.status(504).json({ error: String(err.message || err) });
   }

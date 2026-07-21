@@ -29,11 +29,11 @@ Hooks.on('renderActorSheet', async (app, html, data) => {
   const wrapper = document.createElement('div');
   wrapper.innerHTML = `
     <div class="form-group foundry-controller-config-group" style="border: 1px solid #7a7975; padding: 8px; margin: 8px 0; border-radius: 4px; background: rgba(0,0,0,0.1);${editable ? "" : " opacity: 0.6;"}">
-      <label style="font-weight: bold; color: #4b4a44;"><i class="fas fa-joystick" title="When checked, this character is accessible to a connected controller."></i> Controller Link</label>
+      <label style="font-weight: bold; color: #4b4a44;"><i class="fas fa-joystick" title="When checked, this character's HP is included in the HP Bridge relay's data."></i> HP Bridge Link</label>
       <div class="form-fields">
         <input type="checkbox" ${exposed ? "checked" : ""} ${editable ? "" : "disabled"} name="flags.foundry-controller.exposed" style="margin:0; width:14px; height:14px; flex:0 0 auto;${editable ? "" : " cursor: not-allowed;"}" />
       </div>
-      <p class="notes" style="margin: 4px 0 0 0; font-size: 11px; color: #4b4a44;">Controller Link${editable ? "" : " <em>(you need owner permission on this character to change this setting)</em>"}</p>
+      <p class="notes" style="margin: 4px 0 0 0; font-size: 11px; color: #4b4a44;">Send to HP Monitor${editable ? "" : " <em>(you need owner permission on this character to change this setting)</em>"}</p>
     </div>
   `;
   const node = wrapper.firstElementChild;

@@ -44,6 +44,8 @@ namespace Display {
   void showCharacterList(const std::vector<Character> &chars, int selectedIndex);
 
 void showCharacterDetail(const Character &c, HpAddTarget addTarget, int pendingHp, int pendingTempHp,
-                          int pendingDelta, bool sending, bool justSent);
+                          int pendingDelta, bool sending, bool justSent,
+                          const MovementIndicator &move = MovementIndicator(),
+                          const CircleIndicator &circle = CircleIndicator());
 
 }

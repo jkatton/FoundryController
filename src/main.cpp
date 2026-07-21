@@ -1,4 +1,5 @@
 #include <Arduino.h>
+
 #include <ESP8266WiFi.h>
 #include <WiFiManager.h>
 
@@ -44,9 +45,81 @@ static bool g_sending = false;
 static bool g_justSent = false;
 static unsigned long g_sentBannerUntil = 0;
 
+// HP editing and a pending move are now *both* always live on the detail
+// screen at once - a joystick nudge no longer suspends HP editing, and
+// turning the encoder no longer cancels a pending move. g_lastModified
+// just tracks which of the two the shared "sub-display" area (the arrow/
+// status rows at the bottom of the screen) is currently showing, so it's
+// always whichever the user touched most recently. Button A acts on
+// whichever one is currently shown (see handleCharacterDetail()).
+enum class DetailSubDisplay : uint8_t
+{
+  HP,
+  MOVE
+};
+static DetailSubDisplay g_lastModified = DetailSubDisplay::HP;
+
+// Move: first joystick nudge on the detail screen starts accumulating a
+// token move to preview; every nudge after that (including the first)
+// adds onto the running total and resends a fresh preview. dCol/dRow are
+// the running total offset from the token's actual position (see
+// RelayClient::previewMoveRelative()) since the move started - each nudge
+// resends the new total, not just the latest press, since the relay
+// always computes relative to the token's real (unmoved) position rather
+// than the last preview. Exited by confirming (Button A while the move is
+// the shown sub-display - see confirmMoveAndReturn()) or by a long press
+// of Button A while it's shown, which cancels it (see handleCharacterDetail()).
+static bool g_moveMode = false;
+static int g_moveDCol = 0;
+static int g_moveDRow = 0;
+static float g_moveDistance = 0;
+static String g_moveUnits;
+static bool g_moveSending = false; // a previewMoveRelative()/confirmMove() call is in flight
+
+// Circle: entered from the detail screen by a short press of Button B,
+// which hands the encoder over to dialing a circle's radius
+// (g_circleEditing) centered on the active character's token, without
+// touching whichever of HP-edit or move is the current sub-display -
+// exiting radius-editing resumes whichever of those was showing,
+// unchanged. Once in radius-editing, the two presses of Button B mean
+// different things: a short press removes whatever circle is currently
+// drawn (cancelling the live preview) but *stays* in radius-editing and
+// keeps the dialed-in radius exactly as it was, so a fresh circle can be
+// dialed right back up without starting over; a long press does the
+// opposite - it exits radius-editing (hands the encoder back) but leaves
+// the circle exactly as drawn, persisting on the map. Either way the
+// radius itself is remembered (see persistCircleRadius()) so it carries
+// over between reboots and different characters. Dialing the radius all
+// the way down to zero with the encoder is a third, distinct way out -
+// see the zero-radius handling in handleCharacterDetail(), which resets
+// the remembered radius back to the default instead of remembering zero.
+static bool g_circleEditing = false;
+static bool g_circleDrawn = false;                   // true whenever a circle preview currently exists on the relay's map for this character
+static float g_circleRadius = CIRCLE_RADIUS_DEFAULT; // seeded from g_settings.circleRadius in setup(); persisted (see
+                                                     // persistCircleRadius()) whenever it changes, so it carries over
+                                                     // between reboots and different characters
+static bool g_circleSending = false;                 // a previewCircle() call is in flight
+static bool g_circleRadiusDirty = false;             // radius changed since the last preview send - see CIRCLE_RADIUS_DEBOUNCE_MS
+static unsigned long g_circleLastRadiusChangeMs = 0;
+
 // ===========================================================================
 // Helpers
 // ===========================================================================
+
+// Forward-declared so sendMovePreview() below - defined earlier in the file
+// than currentCircleIndicator() itself - can include the circle indicator
+// in its display refreshes. That matters now that a circle can be drawn
+// (g_circleDrawn) independently of whether it's currently being edited, so
+// a move nudge re-centering it (see nudgeMove()) can happen at any time:
+// without this, sendMovePreview()'s own display calls would momentarily
+// drop the on-screen circle readout until the subsequent
+// sendCirclePreview() call redraws it. Harmless when no circle is drawn
+// at all, where this always evaluates to
+// an inactive indicator anyway - same as the implicit default it's
+// replacing.
+static CircleIndicator currentCircleIndicator();
+static MovementIndicator currentMoveIndicator();
+static void sendCirclePreview();
 
 static void goToError(const String &msg, AppState after)
 {
@@ -261,6 +334,17 @@ static void enterDetailForSelected()
   g_dirty = false;
   g_sending = false;
   g_justSent = false;
+  g_lastModified = DetailSubDisplay::HP;
+  g_moveMode = false; // defensive reset - any pending move should already be exited by the time we leave this screen
+  g_moveDCol = 0;
+  g_moveDRow = 0;
+  g_moveDistance = 0;
+  g_moveUnits = "";
+  g_moveSending = false;
+  g_circleEditing = false; // defensive reset - same reasoning as move mode above
+  g_circleDrawn = false;   // this character's own circle (if any) is left alone server-side - it persists on the map,
+                           // this just stops the *new* character's screen from claiming one it doesn't have
+  g_circleSending = false; // (g_circleRadius intentionally not reset here - it's meant to carry over between characters)
   g_state = AppState::CHARACTER_DETAIL;
   Display::showCharacterDetail(g_activeChar, g_addTarget, g_activeChar.hp, g_activeChar.tempHp, g_deltaValue, false, false);
 }
@@ -316,7 +400,7 @@ static int currentDisplayTempHp() { return computePendingHp().tempHp; }
 
 static void handleIpEntry()
 {
-int32_t delta = InputManager::readEncoderDelta(InputManager::EncoderProfile::IP_ENTRY);
+  int32_t delta = InputManager::readEncoderDelta(InputManager::EncoderProfile::IP_ENTRY);
   if (delta != 0)
   {
     uint16_t &field = g_ipFields[g_ipFieldIndex];
@@ -413,7 +497,7 @@ static void handleCharacterList()
 
   else if (a == ButtonEvent::DOUBLE_PRESS)
   {
-  // Reconfigure server address from scratch.
+    // Reconfigure server address from scratch.
     RelayClient::begin("", 0);
     enterIpEntryDefaults();
     return;
@@ -454,7 +538,8 @@ static void sendCurrentHp()
   g_sending = true;
   int pendingHp = currentDisplayHp();
   int pendingTempHp = currentDisplayTempHp();
-  Display::showCharacterDetail(g_activeChar, g_addTarget, pendingHp, pendingTempHp, g_deltaValue, true, false);
+  Display::showCharacterDetail(g_activeChar, g_addTarget, pendingHp, pendingTempHp, g_deltaValue, true, false,
+                               currentMoveIndicator(), currentCircleIndicator());
 
   bool ok = RelayClient::updateCharacterHp(g_activeChar.uuid, pendingHp, pendingTempHp);
 
@@ -480,7 +565,257 @@ static void sendCurrentHp()
     goToError("update failed: " + RelayClient::lastError(), AppState::CHARACTER_LIST);
     return;
   }
-  Display::showCharacterDetail(g_activeChar, g_addTarget, pendingHp, pendingTempHp, g_deltaValue, false, g_justSent);
+  Display::showCharacterDetail(g_activeChar, g_addTarget, pendingHp, pendingTempHp, g_deltaValue, false, g_justSent,
+                               currentMoveIndicator(), currentCircleIndicator());
+}
+
+// Resets move-mode state and returns to normal HP editing. If
+// cancelOnServer is true, also tells the relay to discard whatever
+// pending target is out there for the active character. Note this is
+// best-effort but NOT self-healing: the relay module no longer expires
+// move previews on its own, so if this call fails (e.g. a network
+// hiccup), the preview line/marker is left showing on the map until
+// something else clears it for this uuid (a later previewMove(), or a
+// manual cancel from Foundry).
+static void exitMoveMode(bool cancelOnServer)
+{
+  if (cancelOnServer && g_moveMode)
+  {
+    RelayClient::cancelMove(g_activeChar.uuid);
+  }
+  g_moveMode = false;
+  g_moveDCol = 0;
+  g_moveDRow = 0;
+  g_moveDistance = 0;
+  g_moveUnits = "";
+  g_moveSending = false;
+}
+
+static MovementIndicator currentMoveIndicator()
+{
+  MovementIndicator m;
+  // Only show the move sub-display when there's actually a pending move
+  // AND it's the one the user touched most recently - HP editing can be
+  // "ahead" of a still-pending move (see the encoder branch in
+  // handleCharacterDetail()), in which case the move stays live in the
+  // background without being drawn here until it's nudged again.
+  m.active = g_moveMode && (g_lastModified == DetailSubDisplay::MOVE);
+  m.dCol = g_moveDCol;
+  m.dRow = g_moveDRow;
+  m.distance = g_moveDistance;
+  m.units = g_moveUnits;
+  m.sending = g_moveSending;
+  return m;
+}
+
+// Sends the current accumulated (g_moveDCol, g_moveDRow) total as a fresh
+// preview. Called on every nudge, always with the running total rather
+// than just the latest press - see the g_moveMode comment up top for why
+// that's the correct thing to resend.
+static void sendMovePreview()
+{
+  g_moveSending = true;
+  Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false, currentMoveIndicator(), currentCircleIndicator());
+
+  RelayClient::MovePreviewResult result;
+  bool ok = RelayClient::previewMoveRelative(g_activeChar.uuid, g_moveDCol, g_moveDRow, result);
+
+  g_moveSending = false;
+
+  if (!ok)
+  {
+    // The preview call itself is what failed - there's no pending target
+    // on the server to clean up.
+    exitMoveMode(false);
+    g_lastModified = DetailSubDisplay::HP;
+    goToError("move failed: " + RelayClient::lastError(), AppState::CHARACTER_LIST);
+    return;
+  }
+
+  g_moveDistance = result.distance;
+  g_moveUnits = result.units;
+  Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false, currentMoveIndicator(), currentCircleIndicator());
+}
+
+// First direction press on the detail screen starts a pending move; every
+// press after that (including the first) accumulates onto the running
+// total, resends a fresh preview, and switches the shared sub-display to
+// show the move (see g_lastModified). If a circle is currently drawn on
+// the map, it's re-sent afterward so it keeps tracking the move target
+// live - this covers both actively dialing the radius and just having
+// left one drawn (see g_circleDrawn's own comment), which is why this no
+// longer needs a separate "during circle mode" variant of nudging.
+static void nudgeMove(int dCol, int dRow)
+{
+  if (!g_moveMode)
+  {
+    g_moveMode = true;
+    g_moveDCol = 0;
+    g_moveDRow = 0;
+    g_moveDistance = 0;
+    g_moveUnits = "";
+  }
+  g_moveDCol += dCol;
+  g_moveDRow += dRow;
+  g_lastModified = DetailSubDisplay::MOVE;
+  g_justSent = false; // a fresh move nudge supersedes any lingering "Sent!" banner from a previous HP/move send
+  sendMovePreview();
+
+  if (g_circleDrawn && g_state == AppState::CHARACTER_DETAIL)
+  {
+    // sendMovePreview() above hit an error and already navigated away if
+    // g_state isn't CHARACTER_DETAIL anymore - nothing left to re-center.
+    sendCirclePreview();
+  }
+}
+
+// Commits whatever's currently previewed and returns to normal HP
+// editing, reusing the same "Sent!" banner mechanism sendCurrentHp() uses
+// so a completed move gets the same brief on-screen confirmation an HP
+// update does.
+static void confirmMoveAndReturn()
+{
+  g_moveSending = true;
+  Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false,
+                               currentMoveIndicator(), currentCircleIndicator());
+
+  RelayClient::MoveResult result;
+  bool ok = RelayClient::confirmMove(g_activeChar.uuid, result);
+
+  g_moveSending = false;
+
+  if (!ok)
+  {
+    // The confirm itself failed - whatever was pending on the server is
+    // already gone/invalid either way, so there's nothing left to cancel.
+    exitMoveMode(false);
+    g_lastModified = DetailSubDisplay::HP; // nothing left to show for the move
+    goToError("move confirm failed: " + RelayClient::lastError(), AppState::CHARACTER_LIST);
+    return;
+  }
+
+  exitMoveMode(false);                   // already committed server-side - nothing to cancel
+  g_lastModified = DetailSubDisplay::HP; // the move's done - the shared sub-display falls back to showing HP
+  g_justSent = true;
+  g_sentBannerUntil = millis() + 1200;
+  Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, true,
+                               currentMoveIndicator(), currentCircleIndicator());
+}
+
+static CircleIndicator currentCircleIndicator()
+{
+  CircleIndicator ci;
+  ci.active = g_circleEditing;
+  ci.drawn = g_circleDrawn;
+  ci.radius = g_circleRadius;
+  ci.units = g_moveUnits; // best-effort guess from the last move preview this session, if any - the relay
+                          // doesn't tell us a scene's distance units any other way (see Types.h)
+  ci.sending = g_circleSending;
+  return ci;
+}
+
+// Redraws the detail screen reflecting current state - whichever of
+// HP-edit/move is the shared sub-display (g_lastModified) plus whatever
+// circle state applies (editing/drawn) - so callers that just changed one
+// piece of that don't each need to know the full parameter list.
+static void redrawDetailScreen()
+{
+  Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(),
+                               g_deltaValue, false, g_justSent, currentMoveIndicator(), currentCircleIndicator());
+}
+
+// Mirrors g_circleRadius into g_settings and writes settings.cfg, but only
+// when it's actually different from what's already saved - avoids a
+// pointless LittleFS write (and its flash-wear cost) on every visit where
+// the radius was never touched from whatever it loaded as. Called
+// whenever the radius is meant to be remembered as-is - on a genuine
+// dial change, and on both ways of leaving radius-editing via Button B
+// (see circleButtonShortPress()/circleButtonLongPress() below) - so the
+// dialed-in value sticks across reboots and different characters. The
+// one exception is dialing all the way down to zero with the encoder
+// (handleCharacterDetail()'s zero-radius handling), which deliberately
+// resets to the default instead of remembering zero.
+static void persistCircleRadius()
+{
+  if (g_settings.circleRadius != g_circleRadius)
+  {
+    g_settings.circleRadius = g_circleRadius;
+    Storage::saveSettings(g_settings);
+  }
+}
+
+// Pushes the current g_circleRadius to the relay as a live preview (see
+// RelayClient::previewCircle()) - called on entering radius-editing, on
+// every radius change while it's open, and whenever a nudged move needs
+// the (still-drawn) circle to re-center on the new target (see
+// nudgeMove()). A failed preview call drops the circle entirely - both
+// g_circleEditing and g_circleDrawn - rather than leaving the user dialing
+// or believing in a radius that isn't actually being drawn anywhere
+// anymore.
+static void sendCirclePreview()
+{
+  g_circleSending = true;
+  redrawDetailScreen();
+
+  bool ok = RelayClient::previewCircle(g_activeChar.uuid, g_circleRadius);
+
+  g_circleSending = false;
+
+  if (!ok)
+  {
+    // The preview call itself is what failed - there's nothing pending on
+    // the server for this attempt to clean up.
+    g_circleEditing = false;
+    g_circleDrawn = false;
+    goToError("circle preview failed: " + RelayClient::lastError(), AppState::CHARACTER_LIST);
+    return;
+  }
+
+  g_circleDrawn = true;
+  redrawDetailScreen();
+}
+
+// Short press of Button B. Outside radius-editing, this is what opens it:
+// hands the encoder over to the circle radius, without disturbing
+// whichever of HP-edit/move is the current shared sub-display, and
+// immediately previews at whatever radius is already dialed in (carried
+// over from last time) rather than waiting for the first encoder turn.
+// Once radius-editing is already open, a second short press instead
+// removes whatever circle is currently drawn (cancelling the live
+// preview) leaves radius-editing - the current
+// radius is remembered (see persistCircleRadius()).
+static void circleButtonShortPress()
+{
+  if (!g_circleEditing)
+  {
+    g_circleEditing = true;
+    g_circleRadiusDirty = false;
+    sendCirclePreview();
+    return;
+  }
+
+  if (g_circleDrawn)
+  {
+    RelayClient::cancelCirclePreview(g_activeChar.uuid); // best-effort - NOT self-healing: the relay no longer expires this on its own, so a failure here leaves the preview showing until something else clears it
+    g_circleDrawn = false;
+  }
+  g_circleEditing = false;
+  g_circleRadiusDirty = false; // whatever hadn't been sent yet is moot - just cancelled the preview outright
+  persistCircleRadius();
+  redrawDetailScreen();
+}
+
+// Long press of Button B - the opposite of a second short press above:
+// exits radius-editing (hands the encoder back to HP-edit/move) but
+// leaves whatever circle is currently drawn exactly as it is, persisting
+// on the map rather than being cancelled. Still remembers the radius
+// (see persistCircleRadius()), same as the short-press case.
+static void circleButtonLongPress()
+{
+  g_circleEditing = false;
+  g_circleRadiusDirty = false;
+  persistCircleRadius();
+  redrawDetailScreen();
 }
 
 static void handleCharacterDetail()
@@ -488,73 +823,268 @@ static void handleCharacterDetail()
   if (g_justSent && millis() > g_sentBannerUntil)
   {
     g_justSent = false;
-    Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false);
+    redrawDetailScreen();
   }
 
-  int32_t delta = InputManager::readEncoderDelta();
-  if (delta != 0)
-  {
-    g_dirty = true;
-    g_deltaValue += delta;
-    // Bounded by maxHp+tempHp rather than just maxHp, so a big enough swing
-    // can still zero out HP through a full temp HP buffer in one edit (and
-    // symmetrically, add that much fresh temp HP) instead of bottoming out
-    // partway there.
-    int maxSwing = g_activeChar.maxHp + g_activeChar.tempHp;
-    if (g_deltaValue < -maxSwing)
-      g_deltaValue = -maxSwing;
-    if (g_deltaValue > maxSwing)
-      g_deltaValue = maxSwing;
-    Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false);
-  }
-
+  // Poll every input exactly once per tick, regardless of mode - each
+  // button/direction's debounce state machine (see InputManager.h) needs
+  // to be called every loop() iteration to stay accurate, even on ticks
+  // where a given result ends up unused below.
+  ButtonEvent joyUp = InputManager::pollJoyUp();
+  ButtonEvent joyDown = InputManager::pollJoyDown();
+  ButtonEvent joyLeft = InputManager::pollJoyLeft();
+  ButtonEvent joyRight = InputManager::pollJoyRight();
   ButtonEvent a = InputManager::pollButtonA();
+  ButtonEvent b = InputManager::pollButtonB();
+
+  // Press-and-hold auto-repeat for continuous movement - see
+  // InputManager.h's pollJoy*Repeat() comment. Polled unconditionally
+  // alongside the events above, same "every tick regardless of whether
+  // it's used" requirement as the rest of this block.
+  bool joyUpRepeat = InputManager::pollJoyUpRepeat();
+  bool joyDownRepeat = InputManager::pollJoyDownRepeat();
+  bool joyLeftRepeat = InputManager::pollJoyLeftRepeat();
+  bool joyRightRepeat = InputManager::pollJoyRightRepeat();
+
+  // Button B is global and independent of HP-edit/move. Outside
+  // radius-editing, a short press opens it. Once it's open: a short press
+  // instead removes whatever circle is currently drawn but stays in
+  // radius-editing (see circleButtonShortPress()), while a long press
+  // exits radius-editing but leaves the circle exactly as drawn (see
+  // circleButtonLongPress()). Checked first so neither can also fall
+  // through and register as anything else below in the same tick.
+  if (b == ButtonEvent::LONG_PRESS)
+  {
+    circleButtonLongPress();
+    return;
+  }
+  if (b == ButtonEvent::SHORT_PRESS)
+  {
+    circleButtonShortPress();
+    return;
+  }
+
+
+  // Encoder: dials the circle radius while radius-editing is open,
+  // otherwise adjusts the pending HP delta. HP editing and a pending move
+  // are always both "live" now - turning the encoder just switches which
+  // one the shared sub-display below shows (g_lastModified), rather than
+  // cancelling the other, so a move can be picked back up later by
+  // nudging the joystick again right where it left off.
+  if (g_circleEditing)
+  {
+    int32_t radiusDelta = InputManager::readEncoderDelta();
+    if (radiusDelta != 0)
+    {
+      g_circleRadius += radiusDelta * CIRCLE_RADIUS_STEP;
+      if (g_circleRadius < 0)
+        g_circleRadius = 0; // dialing down this far removes the circle entirely - see the zero-radius handling just below
+      if (g_circleRadius > CIRCLE_RADIUS_MAX)
+        g_circleRadius = CIRCLE_RADIUS_MAX;
+
+      if (g_circleRadius <= 0)
+      {
+        // Dialed all the way down to zero: remove the circle right away and
+        // hand the encoder back (exit radius-editing) rather than waiting
+        // for the send-debounce below - there's no reason to preview a
+        // zero-radius circle first. The *remembered* radius resets to the
+        // default here rather than staying at zero, so the next time
+        // radius-editing is opened (Button B) it starts from something
+        // visible again instead of needing a full dial-up from nothing.
+        // This is deliberately different from a short press of Button B
+        // (circleButtonShortPress()), which remembers whatever radius was
+        // actually dialed in - dialing past zero here is really just
+        // overshooting the bottom of the range, not an explicit request to
+        // remember zero.
+        g_circleRadiusDirty = false;
+        g_circleEditing = false;
+        if (g_circleDrawn)
+        {
+          RelayClient::cancelCirclePreview(g_activeChar.uuid); // best-effort, same caveat as elsewhere in this file
+          g_circleDrawn = false;
+        }
+        g_circleRadius = CIRCLE_RADIUS_DEFAULT;
+        persistCircleRadius();
+        redrawDetailScreen();
+        return;
+      }
+
+      // The on-screen number updates immediately; the (blocking, network
+      // round-trip) live preview send is debounced below instead of firing
+      // on every single tick - see CIRCLE_RADIUS_DEBOUNCE_MS.
+      g_circleRadiusDirty = true;
+      g_circleLastRadiusChangeMs = millis();
+      redrawDetailScreen();
+    }
+
+    // Fires once, CIRCLE_RADIUS_DEBOUNCE_MS after the encoder last moved -
+    // every tick in between just re-checks the elapsed time and does
+    // nothing further, so a fast spin coalesces into a single preview send
+    // once things settle rather than one per detent.
+    if (g_circleRadiusDirty && millis() - g_circleLastRadiusChangeMs >= CIRCLE_RADIUS_DEBOUNCE_MS)
+    {
+      g_circleRadiusDirty = false;
+      sendCirclePreview();
+      if (g_state != AppState::CHARACTER_DETAIL)
+        return; // sendCirclePreview() hit an error and already bailed to the error screen
+    }
+  
+  if (a == ButtonEvent::LONG_PRESS)
+  {
+    circleButtonLongPress();
+    return;
+  }
   if (a == ButtonEvent::SHORT_PRESS)
   {
-    sendCurrentHp();
+    circleButtonShortPress();
+    return;
+  }
+  }
+  else
+  {
+    int32_t delta = InputManager::readEncoderDelta();
+    if (delta != 0)
+    {
+      g_dirty = true;
+      g_lastModified = DetailSubDisplay::HP;
+      g_deltaValue += delta;
+      // Bounded by maxHp+tempHp rather than just maxHp, so a big enough swing
+      // can still zero out HP through a full temp HP buffer in one edit (and
+      // symmetrically, add that much fresh temp HP) instead of bottoming out
+      // partway there.
+      int maxSwingUp = g_activeChar.maxHp - g_activeChar.hp;
+      if (g_addTarget == HpAddTarget::TEMP)
+      {
+        maxSwingUp = g_activeChar.maxHp - g_activeChar.tempHp;
+      }
+      int maxSwingDown = g_activeChar.hp + g_activeChar.tempHp;
+      if (g_deltaValue < -maxSwingDown)
+        g_deltaValue = -maxSwingDown;
+      if (g_deltaValue > maxSwingUp)
+        g_deltaValue = maxSwingUp;
+      redrawDetailScreen();
+    }
+  }
+
+  // Joystick: always accumulates onto the pending move and switches the
+  // shared sub-display to show it (see nudgeMove()) - works the same
+  // whether or not radius-editing is currently open, and never cancels
+  // any pending HP delta. Direction presses are always instant, single
+  // nudges - InputManager's pollJoy*() never classifies a direction as
+  // LONG_PRESS/DOUBLE_PRESS or holds it back to check (see
+  // InputManager.h), so a nonzero event here always means "just pressed,
+  // right now."
+  if (joyUp != ButtonEvent::NONE || joyUpRepeat)
+  {
+    nudgeMove(0, -1);
+    return;
+  }
+  if (joyDown != ButtonEvent::NONE || joyDownRepeat)
+  {
+    nudgeMove(0, 1);
+    return;
+  }
+  if (joyLeft != ButtonEvent::NONE || joyLeftRepeat)
+  {
+    nudgeMove(-1, 0);
+    return;
+  }
+  if (joyRight != ButtonEvent::NONE || joyRightRepeat)
+  {
+    nudgeMove(1, 0);
+    return;
+  }
+
+  // Button A acts on whichever of HP/move is currently the shared
+  // sub-display (g_lastModified): a short press sends it. A long press
+  // cancels whichever one is shown (if it actually has anything pending),
+  // then swaps to showing the other one if *it* has something pending, or
+  // heads back to the character list if neither does. A double press
+  // always jumps to (and stays on) HP adjustment, even if move or circle
+  // radius-editing was what's currently showing.
+  if (a == ButtonEvent::SHORT_PRESS)
+  {
+    if (g_lastModified == DetailSubDisplay::MOVE && g_moveMode)
+    {
+      confirmMoveAndReturn();
+    }
+    else
+    {
+      sendCurrentHp();
+    }
     return;
   }
   else if (a == ButtonEvent::LONG_PRESS)
   {
-    loadCharacterList(); // manual refresh
-    g_state = AppState::CHARACTER_LIST;
-    Display::showCharacterList(g_characters, g_selectedIndex);
-    g_lastPollMs = millis();
+    // Whether the mode currently on screen actually has anything to give
+    // up - an HP delta of 0 or no pending move both count as "nothing
+    // here", in which case the cancel step below is a no-op and this just
+    // falls through to checking the other side.
+    bool currentHasPending = (g_lastModified == DetailSubDisplay::MOVE) ? g_moveMode : (g_deltaValue != 0);
+
+    if (currentHasPending)
+    {
+      // There was something on the currently-shown sub-display to cancel:
+      // clear it, but stay right here showing the same sub-display (now
+      // empty) rather than falling through to the "nothing pending at
+      // all" handling below - e.g. cancelling a queued move stays on the
+      // move interface instead of bouncing back to the character list.
+      if (g_lastModified == DetailSubDisplay::MOVE)
+      {
+        exitMoveMode(true); // cancel on server
+
+        // While the move was pending, a drawn circle was following the
+        // move target rather than the token's real position (see
+        // nudgeMove()'s re-centering call). Cancelling the move snaps the
+        // server-side token back to its actual position, so the circle
+        // needs a fresh preview to snap back with it - otherwise it's
+        // left drawn wherever the cancelled move had it pointing.
+        if (g_circleDrawn)
+        {
+          sendCirclePreview();
+          if (g_state != AppState::CHARACTER_DETAIL)
+            return; // sendCirclePreview() hit an error and already bailed to the error screen
+        }
+      }
+      else
+      {
+        g_deltaValue = 0;
+        g_dirty = false; // nothing left pending here - safe for the background poll to refresh again
+      }
+      redrawDetailScreen();
+      return;
+    }
+
+    // Nothing was pending on the shown sub-display to begin with - check
+    // whether the *other* one has something pending instead.
+    bool otherHasPending = (g_lastModified == DetailSubDisplay::MOVE) ? (g_deltaValue != 0) : g_moveMode;
+
+    if (otherHasPending)
+    {
+      g_lastModified = (g_lastModified == DetailSubDisplay::MOVE) ? DetailSubDisplay::HP : DetailSubDisplay::MOVE;
+      redrawDetailScreen();
+    }
+    else
+    {
+          RelayClient::cancelCirclePreview(g_activeChar.uuid); // best-effort - NOT self-healing: the relay no longer expires this on its own, so a failure here leaves the preview showing until something else clears it
+    g_circleDrawn = false;
+      loadCharacterList(); // manual refresh, and returns to the character list
+    }
     return;
   }
-
-else if (a == ButtonEvent::DOUBLE_PRESS)
-  {
-// Toggle which pool a positive turn adds to. Subtracting is unaffected -
-    // it always drains temp HP first, then HP, regardless of this setting.
-    g_addTarget = (g_addTarget == HpAddTarget::NORMAL) ? HpAddTarget::TEMP : HpAddTarget::NORMAL;
-    Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false);
-  return;
-  }
-
-
-  ButtonEvent b = InputManager::pollButtonB();
-  if (b == ButtonEvent::SHORT_PRESS)
+  else if (a == ButtonEvent::DOUBLE_PRESS)
   {
     // Toggle which pool a positive turn adds to. Subtracting is unaffected -
     // it always drains temp HP first, then HP, regardless of this setting.
     g_addTarget = (g_addTarget == HpAddTarget::NORMAL) ? HpAddTarget::TEMP : HpAddTarget::NORMAL;
-    Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false);
-  return;
-  }
-
-  else if (b == ButtonEvent::LONG_PRESS)
-  {
-    // Manual refresh of just this character (pulls latest server-side HP,
-    // e.g. if someone else changed it in Foundry since we loaded it).
-    // Character fresh;
-    // if (fetchCharacterByUuid(g_activeChar.uuid, fresh)) {
-    //   g_activeChar = fresh;
-    //   if (!g_dirty) {
-    //     g_deltaValue = 0;
-    //   }
-    //  Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false);
-    // return;
+    // Double-tapping A is also the explicit "give me HP adjustment" action -
+    // hands the encoder back from radius-editing (if that was open) and
+    // switches the shared sub-display to HP even if move was showing,
+    // without cancelling either of them.
+    g_circleEditing = false;
+    g_lastModified = DetailSubDisplay::HP;
+    redrawDetailScreen();
+    return;
   }
 
   // Light background refresh of max HP / name (not current HP or temp HP,
@@ -570,7 +1100,7 @@ else if (a == ButtonEvent::DOUBLE_PRESS)
       g_activeChar.maxHp = fresh.maxHp;
       g_activeChar.tempHp = fresh.tempHp;
       g_activeChar.hp = fresh.hp;
-      Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false);
+      redrawDetailScreen();
     }
   }
 }
@@ -639,6 +1169,7 @@ void setup()
   Display::setGaugeStyleFlat(g_settings.gaugeStyleFlat);
   InputManager::setDebugEnabled(g_settings.serialDebug);
   RelayClient::setTestMode(g_settings.relayTestMode);
+  g_circleRadius = g_settings.circleRadius; // last radius used in circle mode, if any (see g_circleRadius' own comment)
 
   InputManager::begin();
 
@@ -648,7 +1179,7 @@ void setup()
   WiFiManager wm;
   wm.setConfigPortalTimeout(WIFI_PORTAL_TIMEOUT_S);
   // Blocks until connected, portal times out, or user configures WiFi.
-  bool wifiOk = wm.autoConnect("FoundryHPMonitor-Setup");
+  bool wifiOk = wm.autoConnect("FoundryController-Setup");
 
   if (!wifiOk)
   {

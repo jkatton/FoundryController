@@ -2,6 +2,7 @@
 #include "config.h"
 #include "InputManager.h"
 #include <TFT_eSPI.h>
+#include <math.h>
 
 // NOTE ON ESP8266 RAM: the ESP32 version of this file used an offscreen
 // 240x240 sprite (~115KB) to double-buffer the character-detail screen for
@@ -75,7 +76,8 @@ namespace Display
 #define COL_HP_GOOD TFT_GREEN
 #define COL_HP_WARN TFT_YELLOW
 #define COL_HP_BAD TFT_RED
-#define COL_TEMP 0x051F // light blue for temp hp
+#define COL_TEMP 0x051F   // light blue for temp hp
+#define COL_CIRCLE 0xFBE0 // warm orange for the persistent circle-radius readout - distinct from temp hp's blue and the cyan accent
 
 // Max characters per line when the character name is wrapped onto the two
 // name lines on the detail screen (see splitNameLines()). Override in
@@ -236,7 +238,7 @@ namespace Display
   {
     s_listValid = false;
     tft.fillScreen(COL_BG);
-    centeredText(tft, "Foundry HP Monitor", 95, 1, COL_ACCENT);
+    centeredText(tft, "Foundry Controller", 95, 1, COL_ACCENT);
     centeredText(tft, line, 130, 1, COL_TEXT);
   }
 
@@ -246,7 +248,7 @@ namespace Display
     tft.fillScreen(COL_BG);
     centeredText(tft, "WiFi setup needed", 70, 1, COL_ACCENT);
     centeredText(tft, "Connect phone/PC to:", 105, 1, COL_TEXT);
-    centeredText(tft, "FoundryHPMonitor-Setup", 125, 1, COL_TEXT);
+    centeredText(tft, "FoundryController-Setup", 125, 1, COL_TEXT);
     centeredText(tft, "then follow the portal", 150, 1, COL_DIM);
     centeredText(tft, "or go to 192.168.4.1", 165, 1, COL_DIM);
     centeredText(tft, "to pick your WiFi.", 180, 1, COL_DIM);
@@ -321,10 +323,11 @@ namespace Display
     tft.drawString("click:next hold A:go", SCREEN_CX, 200);
     tft.drawString("hold B: settings", SCREEN_CX, 215);
 
-    if (fakery) {
-tft.setTextSize(2);
-    tft.setTextColor(COL_HP_BAD, COL_BG);
-    tft.drawString("LOCAL TEST MODE ON", SCREEN_CX, 80);
+    if (fakery)
+    {
+      tft.setTextSize(2);
+      tft.setTextColor(COL_HP_BAD, COL_BG);
+      tft.drawString("LOCAL TEST MODE ON", SCREEN_CX, 80);
     }
   }
 
@@ -569,6 +572,7 @@ tft.setTextSize(2);
     ROW_NAME2,
     ROW_HP,
     ROW_TEMP,
+    ROW_CIRCLE,
     ROW_DELTA,
     ROW_STATUS_1,
     ROW_STATUS_2,
@@ -576,33 +580,43 @@ tft.setTextSize(2);
   };
 
   // Blanks just the area behind the text, then draws it centered at
-  // (SCREEN_CX, y) - but only when the text or color actually changed since
-  // the last call for this row (see the equality check inside). The blanked
-  // width is whichever is wider: the string being drawn now, or the one
-  // drawn last time for this same row - so a shorter new string (e.g.
-  // "Sent!" replacing "Sending...") still erases whatever stuck out past
-  // its own edges, rather than leaving stale fragments beside the new,
-  // narrower text. `row` just identifies which of showCharacterDetail's
-  // fixed rows this is, purely so each one can track its own previous
-  // width/text - it doesn't affect where anything is drawn.
+  // (SCREEN_CX + xOffset, y) - but only when the text, color, or xOffset
+  // actually changed since the last call for this row (see the equality
+  // check inside). The blanked width is whichever is wider: the string
+  // being drawn now, or the one drawn last time for this same row - so a
+  // shorter new string (e.g. "Sent!" replacing "Sending...") still erases
+  // whatever stuck out past its own edges, rather than leaving stale
+  // fragments beside the new, narrower text. `row` just identifies which
+  // of showCharacterDetail's fixed rows this is, purely so each one can
+  // track its own previous width/text/offset - it doesn't affect where
+  // anything is drawn. xOffset defaults to 0 (screen-centered, the
+  // original behavior); showCharacterDetail's move-mode count sits off to
+  // the side of the direction arrow instead, so it passes a nonzero one -
+  // see the full-band pre-clear there for why a row whose offset can
+  // change between calls needs extra care beyond what this function does
+  // on its own.
   static void drawTextRow(DetailTextRow row, int y, int rowHeight, const String &s, uint8_t size, uint16_t color,
-                          bool forceRedraw = false)
+                          bool forceRedraw = false, int xOffset = 0)
   {
     static int s_lastWidth[ROW_COUNT] = {0};
     static String s_lastStr[ROW_COUNT];
     static uint16_t s_lastRowColor[ROW_COUNT] = {0};
+    static int s_lastXOffset[ROW_COUNT] = {0};
 
-    // Same text in the same color as what's already on screen for this row -
-    // skip the clear+redraw entirely. This is the main source of the detail
-    // screen's flicker on a no-op background refresh, since every row used
-    // to blank and repaint itself every call regardless of whether its
-    // content actually changed. forceRedraw bypasses this after a full
-    // fillScreen() (new character), since the screen was just wiped out from
-    // under whatever these caches remember.
-    if (!forceRedraw && s == s_lastStr[row] && color == s_lastRowColor[row])
+    // Same text in the same color at the same offset as what's already on
+    // screen for this row - skip the clear+redraw entirely. This is the
+    // main source of the detail screen's flicker on a no-op background
+    // refresh, since every row used to blank and repaint itself every call
+    // regardless of whether its content actually changed. forceRedraw
+    // bypasses this after a full fillScreen() (new character) or a
+    // sub-mode switch, since the screen was just wiped out from under
+    // whatever these caches remember.
+    if (!forceRedraw && s == s_lastStr[row] && color == s_lastRowColor[row] && xOffset == s_lastXOffset[row])
     {
       return;
     }
+
+    int cx = SCREEN_CX + xOffset;
 
     tft.setTextSize(size);
     int newWidth = (s.length() > 0) ? tft.textWidth(s) : 0;
@@ -612,21 +626,124 @@ tft.setTextSize(2);
     {
       const int pad = 4; // small margin either side - cheap insurance against
                          // font-metric rounding, not a precise requirement
-      tft.fillRect(SCREEN_CX - clearWidth / 2 - pad, y - rowHeight / 2, clearWidth + pad * 2, rowHeight, COL_BG);
+      tft.fillRect(cx - clearWidth / 2 - pad, y - rowHeight / 2, clearWidth + pad * 2, rowHeight, COL_BG);
     }
     s_lastWidth[row] = newWidth;
     s_lastStr[row] = s;
     s_lastRowColor[row] = color;
+    s_lastXOffset[row] = xOffset;
 
     if (s.length() == 0)
       return;
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(color, COL_BG);
-    tft.drawString(s, SCREEN_CX, y);
+    tft.drawString(s, cx, y);
+  }
+
+  // Renders (or clears) the move-mode direction arrow at a fixed spot
+  // beside the movement count text. `active` covers both "not currently in
+  // move mode" and "circle mode is covering this row instead" - either
+  // way, nothing should be drawn. The arrow points along the true angle of
+  // (dCol, dRow) via atan2f() - screen coordinates already have +x right/
+  // +y down, which is exactly the convention atan2f(dRow, dCol) assumes,
+  // so no axis flipping is needed to get a visually correct heading.
+  // Tracks its own tiny bit of "did anything actually change" state (angle/
+  // active/has-a-vector-yet) so repeated calls with an unchanged direction
+  // are cheap no-ops, same incremental-redraw idea as drawTextRow() -
+  // except this is a raw shape rather than text, so it can't go through
+  // that helper's text-width-based cache.
+  static void drawMoveArrow(int cx, int cy, bool active, int dCol, int dRow, bool forceRedraw)
+  {
+    static bool s_lastActive = false;
+    static bool s_lastHasVector = false;
+    static float s_lastAngle = 0.0f;
+
+    bool hasVector = active && (dCol != 0 || dRow != 0);
+    float angle = hasVector ? atan2f((float)dRow, (float)dCol) : 0.0f;
+
+    bool unchanged = !forceRedraw && active == s_lastActive && hasVector == s_lastHasVector &&
+                     (!hasVector || fabsf(angle - s_lastAngle) < 0.001f);
+    if (unchanged)
+      return;
+
+    const int ARROW_SIZE = 14; // tip distance from cx,cy - tune alongside CLEAR_R below if this changes
+    const int CLEAR_R = ARROW_SIZE + 4;
+    tft.fillRect(cx - CLEAR_R, cy - CLEAR_R, CLEAR_R * 2, CLEAR_R * 2, COL_BG);
+
+    if (active)
+    {
+      if (hasVector)
+      {
+        float tipX = cx + ARROW_SIZE * cosf(angle);
+        float tipY = cy + ARROW_SIZE * sinf(angle);
+        float backLen = ARROW_SIZE * 0.9f;
+        float spread = 0.5f; // radians either side of straight-back - narrower = a more needle-like arrowhead
+        float backAngle = angle + PI;
+        float x1 = cx + backLen * cosf(backAngle - spread);
+        float y1 = cy + backLen * sinf(backAngle - spread);
+        float x2 = cx + backLen * cosf(backAngle + spread);
+        float y2 = cy + backLen * sinf(backAngle + spread);
+        tft.fillTriangle((int)roundf(tipX), (int)roundf(tipY),
+                         (int)roundf(x1), (int)roundf(y1),
+                         (int)roundf(x2), (int)roundf(y2), COL_ACCENT);
+      }
+      else
+      {
+        // Just entered move mode, nothing nudged yet - a small neutral dot
+        // rather than leaving the slot looking empty/broken.
+        tft.fillCircle(cx, cy, 3, COL_DIM);
+      }
+    }
+    // !active: the fillRect above already cleared it - nothing further to draw.
+
+    s_lastActive = active;
+    s_lastHasVector = hasVector;
+    s_lastAngle = angle;
+  }
+
+  // Renders (or clears) circle mode's icon at the same fixed spot the move
+  // arrow uses - a plain ring rather than anything directional, since
+  // circle mode has no "which way" to point (the radius itself is
+  // conveyed by the distance text beside it, not the icon). Same
+  // cheap-no-op-on-unchanged approach as drawMoveArrow(): only active/
+  // inactive can actually change here, so that's all the cache tracks.
+  static void drawCircleIcon(int cx, int cy, bool active, bool forceRedraw)
+  {
+    static bool s_lastActive = false;
+
+    if (!forceRedraw && active == s_lastActive)
+      return;
+
+    const int ICON_R = 12; // matches drawMoveArrow's ARROW_SIZE scale
+    const int CLEAR_R = ICON_R + 4;
+    tft.fillRect(cx - CLEAR_R, cy - CLEAR_R, CLEAR_R * 2, CLEAR_R * 2, COL_BG);
+
+    if (active)
+    {
+      // Two concentric strokes for a bit of visual weight rather than a
+      // hairline - same idea as the arrow's filled triangle reading as a
+      // solid icon rather than an outline sketch.
+      tft.drawCircle(cx, cy, ICON_R, COL_CIRCLE);
+      tft.drawCircle(cx, cy, ICON_R - 1, COL_CIRCLE);
+            tft.drawCircle(cx, cy, 4, COL_CIRCLE);
+      tft.drawCircle(cx, cy, 5, COL_CIRCLE);
+    }
+
+    s_lastActive = active;
+  }
+
+  // Shared by move and circle mode's distance-beside-icon text so both
+  // read the same way at a glance - see showCharacterDetail(). Rounded to
+  // the nearest foot with no unit suffix - the icon (arrow vs. ring)
+  // already tells you which sub-mode you're in, so the number alone reads
+  // fine at this size without "ft" cluttering it up.
+  static String formatDistanceFt(float distance)
+  {
+    return String((int)roundf(distance));
   }
 
   void showCharacterDetail(const Character &c, HpAddTarget addTarget, int pendingHp, int pendingTempHp,
-                           int pendingDelta, bool sending, bool justSent)
+                           int pendingDelta, bool sending, bool justSent, const MovementIndicator &move, const CircleIndicator &circle)
   {
     s_listValid = false;
 
@@ -681,7 +798,7 @@ tft.setTextSize(2);
     // can't selectively recolor otherwise.
     float newDeg = pct * 360.0f;
     float oldDeg = s_lastPct * 360.0f;
-///
+    ///
     if (s_gaugeStyleFlat)
     {
       const int GAUGE_FLAT_STEPS = 40; // ~9 degrees of gradient per repaint step
@@ -761,13 +878,114 @@ tft.setTextSize(2);
       drawTextRow(ROW_NAME1, SCREEN_CY - 10, 18, nameLine1, 2, COL_TEXT, freshCharacter);
     }
 
-    drawTextRow(ROW_HP, SCREEN_CY - 50, 26, String(displayHp) + "/" + String(c.maxHp), 3, hpColor, freshCharacter);
+    drawTextRow(ROW_HP, SCREEN_CY - 48, 26, String(displayHp) + "/" + String(c.maxHp), 3, hpColor, freshCharacter);
 
-    drawTextRow(ROW_TEMP, SCREEN_CY - 80, 14, displayTempHp > 0 ? ("+" + String(displayTempHp) + " temp") : "", 1, COL_TEMP, freshCharacter);
+    drawTextRow(ROW_TEMP, SCREEN_CY - 82, 14, displayTempHp > 0 ? ("+" + String(displayTempHp) + " temp") : "", 1, COL_TEMP, freshCharacter);
+
+    // Circle radius readout, styled the same way as the temp HP row right
+    // above it - shown whenever a circle currently exists on the map for
+    // this character (circle.drawn), independent of whether the encoder is
+    // actively dialing it right now (circle.active, handled separately
+    // below) or of whichever of HP/move the big sub-display area is
+    // currently showing. Blank (and so invisible) when no circle is drawn,
+    // same on/off pattern as the temp-HP row's "only show when > 0" check.
+    drawTextRow(ROW_CIRCLE, SCREEN_CY - 70, 14, circle.drawn ? (formatDistanceFt(circle.radius) + " ft radius") : "", 1, COL_CIRCLE, freshCharacter);
 
     // Always relative now - the dial's raw +/- delta, and which pool a
     // positive turn feeds. Subtracting always drains temp HP first regardless
     // of this setting, so it's only shown/toggled here for the add direction.
+    // This row (and the status rows below, plus the direction arrow beside
+    // it) are the shared sub-display: circle-editing takes it over first if
+    // open (dialing the radius has to monopolize the encoder, so it gets
+    // its own dedicated readout here), otherwise it shows whichever of
+    // HP-edit/move the user touched most recently (see main.cpp's
+    // g_lastModified) - the other one keeps running in the background
+    // rather than being cancelled.
+    static bool s_lastMoveActive = false;
+    static bool s_lastCircleActive = false;
+    bool subModeChanged = (move.active != s_lastMoveActive) || (circle.active != s_lastCircleActive);
+    bool forceRowsRedraw = freshCharacter || subModeChanged;
+    s_lastMoveActive = move.active;
+    s_lastCircleActive = circle.active;
+
+    if (forceRowsRedraw)
+    {
+      // Wipe this band wider than drawTextRow()'s own incremental clear
+      // would (rather than relying on it alone): ROW_DELTA's horizontal
+      // position changes between sub-modes (see the xOffset passed for
+      // move mode below) and the arrow icon is a raw shape outside
+      // drawTextRow()'s tracking entirely, so a same-character sub-mode
+      // switch (no fillScreen()) needs an explicit clear here or stale
+      // pixels from whichever sub-mode was showing before can survive the
+      // switch. Bounded to BAND_HALF_WIDTH rather than the full screen
+      // width, though - this row sits at SCREEN_CY+36, which is inside the
+      // HP ring's inner radius (98px) directly below center, but the ring
+      // itself curves back out to nearly full screen width close to the
+      // edges at this same height (its donut band only exists outside
+      // about +/-91px from center here). A full-width clear would slice
+      // flat black notches into those two slivers of ring on the left and
+      // right every time this fires; staying inside +/-91px keeps this
+      // entirely within the ring's empty inner hole instead.
+      const int BAND_HALF_WIDTH = 80;
+      tft.fillRect(SCREEN_CX - BAND_HALF_WIDTH, (SCREEN_CY + 36) - 20, BAND_HALF_WIDTH * 2, 40, COL_BG);
+    }
+
+    const int ARROW_CX = SCREEN_CX - 34;
+    const int ARROW_CY = SCREEN_CY + 36;
+
+    if (circle.active)
+    {
+      drawMoveArrow(ARROW_CX, ARROW_CY, false, 0, 0, forceRowsRedraw); // this row belongs to circle mode now - arrow slot stays blank
+      drawCircleIcon(ARROW_CX, ARROW_CY, true, forceRowsRedraw);
+
+      String radiusStr = formatDistanceFt(circle.radius);
+      drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, radiusStr, 4, COL_CIRCLE, forceRowsRedraw, 30);
+
+      if (circle.sending)
+      {
+        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Updating...", 1, COL_ACCENT, forceRowsRedraw);
+      }
+      else
+      {
+        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "turn:radius", 1, COL_DIM, forceRowsRedraw);
+      }
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "B:clear hold:done", 1, COL_DIM, forceRowsRedraw);
+      return;
+    }
+
+    if (move.active)
+    {
+      drawCircleIcon(ARROW_CX, ARROW_CY, false, forceRowsRedraw); // this row belongs to move mode now - circle icon slot stays blank
+      drawMoveArrow(ARROW_CX, ARROW_CY, true, move.dCol, move.dRow, forceRowsRedraw);
+
+      // Distance to the accumulated target, beside the arrow - same size/
+      // position/units treatment as circle mode's radius, so the two
+      // sub-modes read the same way at a glance. Only known once the
+      // first preview response comes back (see main.cpp's sendMovePreview()),
+      // so this reads "0" for the single frame between entering move mode
+      // and that response landing.
+      String distStr = formatDistanceFt(move.distance);
+      drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, distStr, 4, COL_ACCENT, forceRowsRedraw, 30);
+
+      if (move.sending)
+      {
+        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Moving...", 1, COL_ACCENT, forceRowsRedraw);
+      }
+      else
+      {
+        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "dir:nudge", 1, COL_DIM, forceRowsRedraw);
+      }
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "click:send hold:cancel", 1, COL_DIM, forceRowsRedraw);
+      return;
+    }
+
+    // Neither move nor circle-editing is the current sub-display: normal
+    // HP editing. Make sure both icon slots are blank (e.g. just switched
+    // back from showing the move) before falling through to the usual
+    // pending-HP-delta rendering.
+    drawMoveArrow(ARROW_CX, ARROW_CY, false, 0, 0, forceRowsRedraw);
+    drawCircleIcon(ARROW_CX, ARROW_CY, false, forceRowsRedraw);
+
     String deltaStr = (pendingDelta > 0 ? "+" : "") + String(pendingDelta);
     deltaStr = (pendingDelta == 0 ? "-" : deltaStr);
 
@@ -775,49 +993,49 @@ tft.setTextSize(2);
     {
       if (addTarget == HpAddTarget::TEMP)
       {
-        drawTextRow(ROW_DELTA, SCREEN_CY + 36, 14, " " + deltaStr + " ", 4, COL_TEMP, freshCharacter);
+        drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, " " + deltaStr + " ", 4, COL_TEMP, forceRowsRedraw);
       }
       else
       {
         if (pendingDelta == 0)
         {
-          drawTextRow(ROW_DELTA, SCREEN_CY + 36, 14, " " + deltaStr + " ", 4, COL_DIM, freshCharacter);
+          drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, " " + deltaStr + " ", 4, COL_DIM, forceRowsRedraw);
         }
         else
         {
-          drawTextRow(ROW_DELTA, SCREEN_CY + 36, 14, " " + deltaStr + " ", 4, COL_HP_GOOD, freshCharacter);
+          drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, " " + deltaStr + " ", 4, COL_HP_GOOD, forceRowsRedraw);
         }
       }
     }
     else if (pendingDelta < 0)
     {
-      drawTextRow(ROW_DELTA, SCREEN_CY + 36, 14, " " + deltaStr + " ", 4, COL_HP_BAD, freshCharacter);
+      drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, " " + deltaStr + " ", 4, COL_HP_BAD, forceRowsRedraw);
     }
     else
     {
-      drawTextRow(ROW_DELTA, SCREEN_CY + 36, 14, "      ", 4, COL_DIM, freshCharacter);
+      drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, "      ", 4, COL_DIM, forceRowsRedraw);
     }
 
     if (sending)
     {
-      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Sending...", 1, COL_ACCENT, freshCharacter);
-      drawTextRow(ROW_STATUS_2, SCREEN_CY + 85, 14, " ", 1, COL_DIM, freshCharacter);
+      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Sending...", 1, COL_ACCENT, forceRowsRedraw);
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, " ", 1, COL_DIM, forceRowsRedraw);
     }
     else if (justSent)
     {
-      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Sent!", 1, COL_HP_GOOD, freshCharacter);
-      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, " ", 1, COL_DIM, freshCharacter);
+      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Sent!", 1, COL_HP_GOOD, forceRowsRedraw);
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, " ", 1, COL_DIM, forceRowsRedraw);
     }
     else
     {
-      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "click:send hold:back", 1, COL_DIM, freshCharacter);
+      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "click:send hold:list", 1, COL_DIM, forceRowsRedraw);
       if (addTarget == HpAddTarget::TEMP)
       {
-        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "B:reg hp", 1, COL_DIM, freshCharacter);
+        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "dbl:reg hp", 1, COL_DIM, forceRowsRedraw);
       }
       else
       {
-        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "B:temp hp", 1, COL_DIM, freshCharacter);
+        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "dbl:temp hp", 1, COL_DIM, forceRowsRedraw);
       }
     }
   }

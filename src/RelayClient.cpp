@@ -23,17 +23,29 @@
 //   POST /characters/update   -> body {"uuid":"...","hp":N,"tempHp":N}
 //                                 updates one of those characters
 //   POST /tokens/move         -> body {"uuid":"...","col":N,"row":N,"timeoutMs":N}
+//                                 or  {"uuid":"...","dCol":N,"dRow":N,"timeoutMs":N}
 //                                 sets (but does not yet commit) a target
-//                                 grid cell for a character's token; the
-//                                 response reports the distance to it
+//                                 for a character's token - either an
+//                                 absolute grid cell, or an offset from its
+//                                 actual current position; the response
+//                                 reports the distance to it
 //   POST /tokens/move/confirm -> body {"uuid":"..."}
 //                                 commits whichever target the last
 //                                 /tokens/move call set for that uuid
 //   POST /tokens/move/cancel  -> body {"uuid":"..."}
 //                                 discards the pending target instead
 //   POST /tokens/circle       -> body {"uuid":"...","radius":N,"color":"#rrggbb","durationMs":N}
-//                                 drops a circular map template centered
-//                                 on a character's token
+//                                 drops a real, persistent circular map
+//                                 template centered on a character's
+//                                 token - implicitly clears any live
+//                                 preview from /tokens/circle/preview
+//   POST /tokens/circle/preview -> body {"uuid":"...","radius":N,"color":"#rrggbb","timeoutMs":N}
+//                                 live, local-only preview of a circle's
+//                                 radius - safe to call repeatedly as a
+//                                 radius is dialed in
+//   POST /tokens/circle/cancel  -> body {"uuid":"..."}
+//                                 discards the live preview instead of
+//                                 committing it
 //   GET  /healthz              -> {"ok":true,"foundryConnected":bool}, used
 //                                 by connect() to confirm both the relay and
 //                                 a Foundry world are reachable
@@ -53,7 +65,8 @@
 // Test Mode" entry on the settings screen - rather than the compile-time
 // #if this used to be. Defaults to RELAY_TEST_MODE from config.h. When
 // enabled, connect()/fetchCharacters()/updateCharacterHp()/previewMove()/
-// confirmMove()/cancelMove()/createCircle() skip the relay's HTTP surface
+// previewMoveRelative()/confirmMove()/cancelMove()/createCircle()/
+// previewCircle()/cancelCirclePreview() skip the relay's HTTP surface
 // entirely and operate on a small predefined party kept in RAM instead:
 // connect() "succeeds" after a short simulated delay, so
 // showRelayConnecting() is still visible for a beat, and every
@@ -449,6 +462,60 @@ namespace RelayClient
     return true;
   }
 
+  bool previewMoveRelative(const String &uuid, int dCol, int dRow, MovePreviewResult &out, uint32_t timeoutMs)
+  {
+    if (s_testMode)
+    {
+      MockTokenState &state = mockTokenStates()[uuid]; // default-constructs at (0,0) if new
+      // Always relative to the confirmed position (state.col/row), never
+      // to an earlier pending target - matches the relay's own semantics,
+      // so a caller can resend the running total on every nudge.
+      state.pendingCol = state.col + dCol;
+      state.pendingRow = state.row + dRow;
+      state.hasPending = true;
+
+      out.col = state.pendingCol;
+      out.row = state.pendingRow;
+      out.distance = sqrtf(float(dCol * dCol + dRow * dRow)) * mockCellDistanceUnit();
+      out.units = "ft";
+      return true;
+    }
+
+    if (!s_connected)
+    {
+      s_lastError = "not connected";
+      return false;
+    }
+
+    JsonDocument reqDoc;
+    reqDoc["uuid"] = uuid;
+    reqDoc["dCol"] = dCol;
+    reqDoc["dRow"] = dRow;
+    if (timeoutMs > 0)
+      reqDoc["timeoutMs"] = timeoutMs;
+
+    JsonDocument respDoc;
+    String errOut;
+    if (!doPost("/tokens/move", reqDoc, respDoc, errOut))
+    {
+      s_lastError = errOut;
+      return false;
+    }
+
+    JsonObject preview = respDoc["preview"].as<JsonObject>();
+    if (preview.isNull())
+    {
+      s_lastError = "unexpected /tokens/move response shape";
+      return false;
+    }
+
+    out.col = preview["col"] | 0;
+    out.row = preview["row"] | 0;
+    out.distance = preview["distance"] | 0.0f;
+    out.units = preview["units"] | "";
+    return true;
+  }
+
   bool confirmMove(const String &uuid, MoveResult &out)
   {
     if (s_testMode)
@@ -565,6 +632,73 @@ namespace RelayClient
 
     if (outTemplateId)
       *outTemplateId = respDoc["templateId"] | "";
+    return true;
+  }
+
+  bool previewCircle(const String &uuid, float radius, const String &color, uint32_t timeoutMs)
+  {
+    if (s_testMode)
+    {
+      // Test mode has no real canvas to draw a preview on - this is purely
+      // about exercising the calling code's success/failure path, so it
+      // just always succeeds without any further bookkeeping.
+      return true;
+    }
+
+    if (!s_connected)
+    {
+      s_lastError = "not connected";
+      return false;
+    }
+
+    JsonDocument reqDoc;
+    reqDoc["uuid"] = uuid;
+    if (radius > 0)
+      reqDoc["radius"] = radius;
+    if (color.length() > 0)
+      reqDoc["color"] = color;
+    if (timeoutMs > 0)
+      reqDoc["timeoutMs"] = timeoutMs;
+
+    JsonDocument respDoc;
+    String errOut;
+    if (!doPost("/tokens/circle/preview", reqDoc, respDoc, errOut))
+    {
+      s_lastError = errOut;
+      return false;
+    }
+
+    return true;
+  }
+
+  bool cancelCirclePreview(const String &uuid, bool *outCleared)
+  {
+    if (s_testMode)
+    {
+      if (outCleared)
+        *outCleared = false; // nothing was ever actually drawn in test mode - see previewCircle()
+      return true;
+    }
+
+    if (!s_connected)
+    {
+      s_lastError = "not connected";
+      return false;
+    }
+
+    JsonDocument reqDoc;
+    reqDoc["uuid"] = uuid;
+
+    JsonDocument respDoc;
+    String errOut;
+    if (!doPost("/tokens/circle/cancel", reqDoc, respDoc, errOut))
+    {
+      s_lastError = errOut;
+      return false;
+    }
+
+    if (outCleared)
+      *outCleared = respDoc["cleared"] | false;
     return true;
   }
 
