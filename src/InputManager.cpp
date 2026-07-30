@@ -250,9 +250,19 @@ namespace InputManager
   static ButtonState s_joyLeft;
   static ButtonState s_joyRight;
 
-  static ButtonEvent pollButton(ButtonState &btn)
+  static ButtonEvent pollButton(ButtonState &btn, bool forceReleased = false)
   {
     bool raw = (expanderState() >> btn.expBit) & 0x01;
+    if (forceReleased)
+    {
+      // Caller has determined this raw press is spurious (e.g. the new
+      // joystick hardware closes Button A's contact simultaneously with
+      // any direction) - treat it as released before it ever reaches the
+      // debounce/press-timing state below, rather than letting a real
+      // press start and then get cut short, which would surface as a
+      // bogus SHORT_PRESS the instant the direction is released.
+      raw = HIGH;
+    }
     unsigned long now = millis();
 
     if (raw != btn.lastRawState)
@@ -330,7 +340,25 @@ namespace InputManager
     return ButtonEvent::NONE;
   }
 
-  ButtonEvent pollButtonA() { return pollButton(s_btnA); }
+  // The RKJXT1F42001's 4-direction tilt switch also closes the center
+  // push (Button A) contact whenever any direction is actuated - a
+  // hardware quirk of this part, not a real simultaneous press. Rather
+  // than let that spurious closure feed the debounce/short/long/double
+  // press machine at all, it's masked out here: if any direction bit is
+  // currently low (pressed) in this same expander snapshot, Button A's
+  // raw reading is forced to "released" before pollButton() ever sees
+  // it. Directions themselves go through pollDirection() below and are
+  // unaffected.
+  static bool anyDirectionRawPressed()
+  {
+    uint16_t exp = expanderState();
+    return !((exp >> EXP_PIN_JOY_UP) & 0x01) ||
+           !((exp >> EXP_PIN_JOY_DOWN) & 0x01) ||
+           !((exp >> EXP_PIN_JOY_LEFT) & 0x01) ||
+           !((exp >> EXP_PIN_JOY_RIGHT) & 0x01);
+  }
+
+  ButtonEvent pollButtonA() { return pollButton(s_btnA, anyDirectionRawPressed()); }
   ButtonEvent pollButtonB() { return pollButton(s_btnB); }
 
   // Direction switches (joystick tilt) are always instant, single-shot
