@@ -226,12 +226,28 @@ static String settingValueTableOrientation(const AppSettings &s)
   return String(labels[s.tableOrientation & 0x03]) + " deg";
 }
 
+static void settingApplyMoveButtons(AppSettings &s, int32_t delta)
+{
+  // Only two states - any turn just flips it, regardless of direction or
+  // magnitude.
+  if (delta != 0)
+  {
+    s.moveButtonsEnabled = !s.moveButtonsEnabled;
+  }
+}
+
+static String settingValueMoveButtons(const AppSettings &s)
+{
+  return s.moveButtonsEnabled ? "On" : "Off";
+}
+
 static const SettingDescriptor SETTINGS_TABLE[] = {
     {"Screen rotation", settingApplyRotation, settingValueRotation},
     {"HP gauge style", settingApplyGaugeStyle, settingValueGaugeStyle},
     {"Serial Debug Output", settingApplySerialDebug, settingValueSerialDebug},
     {"Local Relay Test Mode", settingApplyRelayTestMode, settingValueRelayTestMode},
     {"Table Orientation", settingApplyTableOrientation, settingValueTableOrientation},
+    {"Move Buttons", settingApplyMoveButtons, settingValueMoveButtons},
 };
 static const int SETTINGS_COUNT = sizeof(SETTINGS_TABLE) / sizeof(SETTINGS_TABLE[0]);
 
@@ -279,7 +295,16 @@ static void rotateQuarterTurnsCW(int col, int row, uint8_t turns, int &outCol, i
 // rotation applied after this one, only to what's sent to the relay.
 static void rotateForScreenRotation(int col, int row, int &outCol, int &outRow)
 {
-  rotateQuarterTurnsCW(col, row, g_settings.screenRotation, outCol, outRow);
+  // Compensating for the screen's rotation means applying the INVERSE of
+  // that rotation to the input, not the same one - if the display's
+  // content is rotated 90 deg CW, a physical "up" press needs to be
+  // rotated 90 deg CCW (i.e. 270 deg CW) to still land on visual "up".
+  // 0 and 180 deg are their own inverse (0 and 2 quarter turns undo
+  // themselves), which is why those two happened to work even with the
+  // rotation applied forwards; 90 and 270 are each other's inverse, so
+  // applying screenRotation directly sent those two backwards.
+  uint8_t inverseTurns = (4 - (g_settings.screenRotation & 0x03)) & 0x03;
+  rotateQuarterTurnsCW(col, row, inverseTurns, outCol, outRow);
 }
 
 // Rotates a joystick-accumulated (dCol, dRow) delta by g_settings.tableOrientation
@@ -746,6 +771,27 @@ static void nudgeMove(int dCol, int dRow)
   g_moveDRow += dRow;
   g_lastModified = DetailSubDisplay::MOVE;
   g_justSent = false; // a fresh move nudge supersedes any lingering "Sent!" banner from a previous HP/move send
+
+  if (g_moveDCol == 0 && g_moveDRow == 0)
+  {
+    // Net accumulated offset is back to zero (the last few nudges
+    // cancelled out) - there's nothing left to preview, so drop the
+    // pending move entirely (telling the relay to discard its preview
+    // target) and fall back to the HP sub-display, rather than sitting
+    // on a move screen reading "0 ft" with no arrow.
+    exitMoveMode(true);
+    g_lastModified = DetailSubDisplay::HP;
+    Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false, currentMoveIndicator(), currentCircleIndicator());
+
+    if (g_circleDrawn && g_state == AppState::CHARACTER_DETAIL)
+    {
+      // Re-center the circle back on the token's real (unmoved)
+      // position now that the pending move has been cancelled.
+      sendCirclePreview();
+    }
+    return;
+  }
+
   sendMovePreview();
 
   if (g_circleDrawn && g_state == AppState::CHARACTER_DETAIL)
@@ -1063,33 +1109,42 @@ static void handleCharacterDetail()
   // right now." Each physical direction is remapped by
   // rotateForScreenRotation() before reaching nudgeMove(), so "up" always
   // nudges whatever's visually up on the (possibly rotated) screen.
-  if (joyUp != ButtonEvent::NONE || joyUpRepeat)
+  //
+  // Gated on g_settings.moveButtonsEnabled ("Move Buttons" on the
+  // settings screen) - still polled every loop above regardless (per
+  // InputManager's polling contract) so debounce/repeat state stays
+  // correct, but the presses themselves are simply dropped here when the
+  // setting is off, same as if nothing were wired to the joystick.
+  if (g_settings.moveButtonsEnabled)
   {
-    int dCol, dRow;
-    rotateForScreenRotation(0, -1, dCol, dRow);
-    nudgeMove(dCol, dRow);
-    return;
-  }
-  if (joyDown != ButtonEvent::NONE || joyDownRepeat)
-  {
-    int dCol, dRow;
-    rotateForScreenRotation(0, 1, dCol, dRow);
-    nudgeMove(dCol, dRow);
-    return;
-  }
-  if (joyLeft != ButtonEvent::NONE || joyLeftRepeat)
-  {
-    int dCol, dRow;
-    rotateForScreenRotation(-1, 0, dCol, dRow);
-    nudgeMove(dCol, dRow);
-    return;
-  }
-  if (joyRight != ButtonEvent::NONE || joyRightRepeat)
-  {
-    int dCol, dRow;
-    rotateForScreenRotation(1, 0, dCol, dRow);
-    nudgeMove(dCol, dRow);
-    return;
+    if (joyUp != ButtonEvent::NONE || joyUpRepeat)
+    {
+      int dCol, dRow;
+      rotateForScreenRotation(0, -1, dCol, dRow);
+      nudgeMove(dCol, dRow);
+      return;
+    }
+    if (joyDown != ButtonEvent::NONE || joyDownRepeat)
+    {
+      int dCol, dRow;
+      rotateForScreenRotation(0, 1, dCol, dRow);
+      nudgeMove(dCol, dRow);
+      return;
+    }
+    if (joyLeft != ButtonEvent::NONE || joyLeftRepeat)
+    {
+      int dCol, dRow;
+      rotateForScreenRotation(-1, 0, dCol, dRow);
+      nudgeMove(dCol, dRow);
+      return;
+    }
+    if (joyRight != ButtonEvent::NONE || joyRightRepeat)
+    {
+      int dCol, dRow;
+      rotateForScreenRotation(1, 0, dCol, dRow);
+      nudgeMove(dCol, dRow);
+      return;
+    }
   }
 
   // Button A acts on whichever of HP/move is currently the shared

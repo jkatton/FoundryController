@@ -108,10 +108,10 @@
 #define PCF8575_I2C_ADDR       0x20   // default address with all address pins tied low; adjust if wired differently
 
 #define EXP_PIN_ENCODER_BTN    0   // P0 - RKJXT1F42001 center push ("Button A")
-#define EXP_PIN_JOY_UP         2   // P1
-#define EXP_PIN_JOY_DOWN       1   // P2
-#define EXP_PIN_JOY_LEFT       4   // P3
-#define EXP_PIN_JOY_RIGHT      3   // P4
+#define EXP_PIN_JOY_UP         3   // P1
+#define EXP_PIN_JOY_DOWN       1   // P2 
+#define EXP_PIN_JOY_LEFT       4   // P3 
+#define EXP_PIN_JOY_RIGHT      2   // P4
 #define EXP_PIN_BUTTON2        5   // P5 - standalone "Button B"
 
 // =====================================================================

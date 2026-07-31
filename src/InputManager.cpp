@@ -25,10 +25,10 @@ namespace InputManager
   static unsigned long s_lastStepMs = 0; // timestamp of last nonzero step, for acceleration
 
   static const int8_t QUAD_TABLE[16] = {
-      0, -1, +1, 0,
-      +1, 0, 0, -1,
+      0, +1, -1, 0,
       -1, 0, 0, +1,
-      0, +1, -1, 0};
+      +1, 0, 0, -1,
+      0, -1, +1, 0};
 
   // Acceleration tiers: if the time-per-detent since the last read is under
   // maxMsPerDetent, apply the paired multiplier. Table must stay ordered
@@ -74,8 +74,11 @@ namespace InputManager
     interrupts();
 
     int32_t diff = current - s_lastProcessed;
-    int32_t steps = diff / 4;
-    s_lastProcessed += steps * 4;
+    // New encoder outputs 2 raw quadrature transitions per detent (was 4
+    // on the old part) - divisor/multiplier below updated to match, or
+    // every other detent would get silently swallowed.
+    int32_t steps = diff / 2;
+    s_lastProcessed += steps * 2;
 
     if (steps == 0)
     {

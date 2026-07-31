@@ -57,6 +57,11 @@ struct AppSettings {
                                                   // the screen/joystick. Purely a move-command transform - unlike
                                                   // screenRotation, changing it has no immediate on-screen effect to
                                                   // live-preview.
+  bool moveButtonsEnabled = true;                 // when false, joystick direction presses on the character detail
+                                                  // screen are ignored entirely (see main.cpp's handleCharacterDetail())
+                                                  // - directions are still polled every loop as usual, just not acted
+                                                  // on, so debounce/repeat state stays correct for whenever this is
+                                                  // switched back on
 };
 
 // HP adjustment mode within the detail screen
