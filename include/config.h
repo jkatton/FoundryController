@@ -200,5 +200,25 @@
 // picking whichever of these two labels currently names the physical
 // button performing a given role (see Display.cpp's labelA()/labelB()).
 //
-#define BUTTON_A_LABEL 'X'
-#define BUTTON_B_LABEL 'O'
+// These are currently set to two custom icon glyphs rather than plain
+// letters - codes 0x60 (backtick) and 0x7E (tilde) of TFT_eSPI's default
+// GLCD font (font 1, the only font this project uses), which
+// scripts/patch_glcdfont.py overwrites with an X / circle icon on every
+// build (see that file for the actual bit patterns). Neither backtick
+// nor tilde appears anywhere in this codebase's on-screen text, which is
+// what makes them safe to repurpose.
+//
+// Deliberately NOT one of the control-character codes (1-31) that seem
+// like the obvious "unused" slots at first glance: TFT_eSPI's low-level
+// glyph-drawing routine (TFT_eSPI::drawChar(x, y, c, color, bg, size))
+// unconditionally does `if (c < 32) return;` before it ever looks at the
+// font table - it reserves layout width for those codes but never
+// actually paints them, regardless of font. Codes 32 and up don't hit
+// that check.
+//
+// If scripts/patch_glcdfont.py isn't wired up yet (see platformio.ini's
+// extra_scripts), these just show the font's original backtick/tilde
+// glyphs instead of icons - switch back to plain 'A'/'B' below at any
+// time if that script isn't in use.
+#define BUTTON_A_LABEL (char)0x60  // backtick - patched to an X
+#define BUTTON_B_LABEL (char)0x7E  // tilde - patched to a circle

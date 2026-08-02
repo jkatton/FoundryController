@@ -117,9 +117,15 @@ static unsigned long g_circleLastRadiusChangeMs = 0;
 // at all, where this always evaluates to
 // an inactive indicator anyway - same as the implicit default it's
 // replacing.
+//
+// redrawDetailScreen() is forward-declared for the same reason: its own
+// definition comes later in the file than sendCurrentHp() and
+// confirmMoveAndReturn(), both of which now call it directly on their
+// no-op/zero-change early-return paths.
 static CircleIndicator currentCircleIndicator();
 static MovementIndicator currentMoveIndicator();
 static void sendCirclePreview();
+static void redrawDetailScreen();
 
 static void goToError(const String &msg, AppState after)
 {
@@ -222,8 +228,8 @@ static void settingApplyTableOrientation(AppSettings &s, int32_t delta)
 
 static String settingValueTableOrientation(const AppSettings &s)
 {
-  static const char *labels[4] = {"0", "90", "180", "270"};
-  return String(labels[s.tableOrientation & 0x03]) + " deg";
+  static const char *labels[4] = {"^", "<", "v", ">"};
+  return "Table N is: " + String(labels[s.tableOrientation & 0x03]);
 }
 
 static void settingApplyMoveButtons(AppSettings &s, int32_t delta)
@@ -662,9 +668,31 @@ static void handleCharacterList()
 
 static void sendCurrentHp()
 {
-  g_sending = true;
   int pendingHp = currentDisplayHp();
   int pendingTempHp = currentDisplayTempHp();
+
+  // Nothing would actually change on the relay - e.g. the encoder swung
+  // but got clamped right back to where HP/temp HP already were (already
+  // at max, or already at 0), or g_deltaValue is 0 outright. Skip the
+  // network round trip entirely rather than sending a no-op update: no
+  // "sending"/"Sent!" UI, no request. Still hands the shared sub-display
+  // over to a queued move (same as the real-send path below) so a short
+  // press of A reliably gets you to whichever of HP/move actually has
+  // something pending, even when this particular press turned out to be
+  // a no-op.
+  if (pendingHp == g_activeChar.hp && pendingTempHp == g_activeChar.tempHp)
+  {
+    g_deltaValue = 0;
+    g_dirty = false;
+    if (g_moveMode)
+    {
+      g_lastModified = DetailSubDisplay::MOVE;
+    }
+    redrawDetailScreen();
+    return;
+  }
+
+  g_sending = true;
   Display::showCharacterDetail(g_activeChar, g_addTarget, pendingHp, pendingTempHp, g_deltaValue, true, false,
                                currentMoveIndicator(), currentCircleIndicator());
 
@@ -685,6 +713,16 @@ static void sendCurrentHp()
     {
       g_characters[g_selectedIndex].hp = pendingHp;
       g_characters[g_selectedIndex].tempHp = pendingTempHp;
+    }
+    // A move can be queued in the background while HP editing is what's
+    // shown (see the encoder branch in handleCharacterDetail() and
+    // currentMoveIndicator()'s comment) - once the HP update is actually
+    // sent, there's nothing more to look at on the HP side, so hand the
+    // shared sub-display over to the pending move instead of continuing
+    // to sit on the now-quiet HP view.
+    if (g_moveMode)
+    {
+      g_lastModified = DetailSubDisplay::MOVE;
     }
   }
   else
@@ -831,6 +869,21 @@ static void nudgeMove(int dCol, int dRow)
 // update does.
 static void confirmMoveAndReturn()
 {
+  // Nothing would actually move - the accumulated offset nets out to
+  // zero. In normal use nudgeMove() already catches this itself (a nudge
+  // that brings the total back to (0,0) exits move mode outright, so this
+  // function wouldn't even be reached), but guarding here too means a
+  // confirm never fires a no-op move at the relay even if some future
+  // path reaches this function with a stale zero offset. Best-effort
+  // cancel rather than confirm, same as nudgeMove()'s own zero handling.
+  if (g_moveDCol == 0 && g_moveDRow == 0)
+  {
+    exitMoveMode(true);
+    g_lastModified = DetailSubDisplay::HP;
+    redrawDetailScreen();
+    return;
+  }
+
   g_moveSending = true;
   Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false,
                                currentMoveIndicator(), currentCircleIndicator());
@@ -1350,7 +1403,7 @@ void setup()
   InputManager::begin();
 
   Display::showBoot("Starting WiFi...");
-
+  delay(1000);
   Display::showWifiPortalHint();
   WiFiManager wm;
   wm.setConfigPortalTimeout(WIFI_PORTAL_TIMEOUT_S);
@@ -1365,7 +1418,7 @@ void setup()
   }
 
   Display::showBoot("WiFi connected");
-  delay(400);
+  delay(1000);
 
   // Try the previously saved relay address first.
   String host;

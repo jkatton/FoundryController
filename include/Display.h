@@ -22,6 +22,12 @@ namespace Display {
   void setGaugeStyleFlat(bool flat);
 
   void showBoot(const String &line);
+
+  // Draws the Char-o-matic wordmark centered on the display, on a plain
+  // COL_BG background. Standalone splash screen - call it, let it sit on
+  // screen for whatever duration the caller wants, then move on to the
+  // next showXxx() (there's no auto-timeout or fade built in here).
+  void showLogo();
   void showWifiPortalHint();              // shown right before WiFiManager's blocking autoConnect()
   void showRelayConnecting(const String &host, uint16_t port);
   void showError(const String &message);

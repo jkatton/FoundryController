@@ -1,6 +1,7 @@
 #include "Display.h"
 #include "config.h"
 #include "InputManager.h"
+#include "char_o_matic_logo.h"
 #include <TFT_eSPI.h>
 #include <math.h>
 
@@ -271,9 +272,35 @@ static int ringHoleHalfWidth(int absDy)
   void showBoot(const String &line)
   {
     s_listValid = false;
+    //tft.fillScreen(COL_BG);
+    //centeredText(tft, "Foundry Controller", 95, 1, COL_ACCENT);
+    
+    showLogo();
+    centeredText(tft, line, 180, 1, COL_TEXT);
+  }
+
+  void showLogo()
+  {
+    s_listValid = false;
     tft.fillScreen(COL_BG);
-    centeredText(tft, "Foundry Controller", 95, 1, COL_ACCENT);
-    centeredText(tft, line, 130, 1, COL_TEXT);
+    // The RGB565 bitmap is opaque (baked-in black background, not a
+    // transparent mask), so it just needs to land in the right spot -
+    // no separate clear step beyond the fillScreen above.
+    //
+    // Read a row at a time into a small stack buffer via memcpy_P rather
+    // than pushImage()'ing straight from the PROGMEM array: ESP8266 flash
+    // reads need to be word-aligned, and dereferencing a PROGMEM pointer
+    // directly (which pushImage would do internally) risks an unaligned
+    // read exception. memcpy_P handles that correctly, and one row
+    // (190 * 2 = 380 bytes here) is a trivial amount of stack.
+    int x = (tft.width() - CHAR_O_MATIC_LOGO_W) / 2;
+    int y = (tft.height() - CHAR_O_MATIC_LOGO_H) / 2 - 40;
+    uint16_t rowBuf[CHAR_O_MATIC_LOGO_W];
+    for (int row = 0; row < CHAR_O_MATIC_LOGO_H; row++)
+    {
+      memcpy_P(rowBuf, &CHAR_O_MATIC_LOGO_RGB565[row * CHAR_O_MATIC_LOGO_W], sizeof(rowBuf));
+      tft.pushImage(x, y + row, CHAR_O_MATIC_LOGO_W, 1, rowBuf);
+    }
   }
 
   void showWifiPortalHint()
@@ -537,7 +564,7 @@ static int ringHoleHalfWidth(int absDy)
   // anti-aliased seams at the joins between old and new segments.
 
   static void drawGaugeArc(TFT_eSPI &d, int cx, int cy, int outerR, int innerR,
-                           float startDeg, float endDeg, uint16_t color)
+                           float startDeg, float endDeg, uint16_t color, bool smooth = true)
   {
     if (endDeg <= startDeg)
       return;
@@ -547,10 +574,10 @@ static int ringHoleHalfWidth(int absDy)
       // toTftAngle(), which collapses 0 and 360 to the same raw angle and
       // would draw a zero-length (i.e. invisible) arc here instead of a
       // full circle.
-      d.drawArc(cx, cy, outerR, innerR, 0, 360, color, COL_BG, true);
+      d.drawArc(cx, cy, outerR, innerR, 0, 360, color, COL_BG, smooth);
       return;
     }
-    d.drawArc(cx, cy, outerR, innerR, toTftAngle(startDeg), toTftAngle(endDeg), color, COL_BG, true);
+    d.drawArc(cx, cy, outerR, innerR, toTftAngle(startDeg), toTftAngle(endDeg), color, COL_BG, smooth);
   }
 
   // Returns an interpolated red->yellow->green color for a gauge position,
@@ -855,8 +882,16 @@ static int ringHoleHalfWidth(int absDy)
     // If the color band changed (e.g. green -> yellow) we have to repaint
     // the whole filled portion, since the old color is baked into pixels we
     // can't selectively recolor otherwise.
-    float newDeg = pct * 360.0f;
-    float oldDeg = s_lastPct * 360.0f;
+    // Snap to whole degrees here, matching the rounding toTftAngle() applies
+    // when these values actually hit the display. Only the ring geometry
+    // (this boundary) needs to be pixel-consistent frame to frame; pct
+    // itself stays unrounded for color purposes below. Without this, oldDeg
+    // here and the boundary actually painted last frame can round to
+    // different integer degrees, leaving a real, fully-opaque leftover
+    // pixel of stale color between where this frame's erase starts and
+    // where last frame's fill actually stopped.
+    float newDeg = roundf(pct * 360.0f);
+    float oldDeg = roundf(s_lastPct * 360.0f);
     ///
     if (s_gaugeStyleFlat)
     {
@@ -864,14 +899,25 @@ static int ringHoleHalfWidth(int absDy)
       uint16_t hpColorQuantized = gaugeGradientColor(round(pct * GAUGE_FLAT_STEPS) / (float)GAUGE_FLAT_STEPS);
 
       // Grow/shrink the boundary exactly as before - independent of whether
-      // the color changed this tick.
+      // the color changed this tick. smooth=false on all three flat-mode
+      // calls (this pair plus the recolor below) is deliberate: smoothArc's
+      // antialiasing always blends edge pixels toward the fixed COL_BG
+      // passed to TFT_eSPI, not toward whatever color the call is actually
+      // butting up against (hpColor here, COL_TRACK there) - fine when that
+      // neighbor really is COL_BG, wrong otherwise, and it only takes one
+      // side of a seam being wrong to leave a stray fleck. Keeping every
+      // flat-mode edge hard avoids the mismatch entirely instead of trying
+      // to get AA to agree with itself across separate calls; flat mode's
+      // whole aesthetic is solid bands anyway, so losing the soft edge here
+      // costs nothing. Gradient mode below is untouched since it isn't
+      // reported to have this problem and the smoothing matters more there.
       if (newDeg > oldDeg)
       {
-        drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, hpOuterR, hpInnerR, oldDeg, newDeg, hpColor);
+        drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, hpOuterR, hpInnerR, oldDeg, newDeg, hpColor, false);
       }
       else if (newDeg < oldDeg)
       {
-        drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, hpOuterR, hpInnerR, newDeg, oldDeg, COL_TRACK);
+        drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, hpOuterR, hpInnerR, newDeg, oldDeg, COL_TRACK, false);
       }
 
       // If the color band shifted, only the already-filled region (0->newDeg)
@@ -881,7 +927,7 @@ static int ringHoleHalfWidth(int absDy)
       // wipe+redraw (and the flicker that came with it) on every color step.
       if (hpColorQuantized != s_lastColor && newDeg > 0)
       {
-        drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, hpOuterR, hpInnerR, 0, newDeg, hpColor);
+        drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, hpOuterR, hpInnerR, 0, newDeg, hpColor, false);
       }
       s_lastColor = hpColorQuantized;
     }
@@ -896,7 +942,7 @@ static int ringHoleHalfWidth(int absDy)
         drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, hpOuterR, hpInnerR, newDeg, oldDeg, COL_TRACK);
       }
     }
-    s_lastPct = pct;
+    s_lastPct = newDeg / 360.0f;
     ///
     // Temp HP ring: scaled the same way as the HP ring (fraction of maxHp,
     // capped at a full loop when temp HP >= maxHp). Unlike the HP ring there's
@@ -906,8 +952,8 @@ static int ringHoleHalfWidth(int absDy)
     if (tempPct > 1.0f)
       tempPct = 1.0f;
 
-    float newTempDeg = tempPct * 360.0f;
-    float oldTempDeg = s_lastTempPct * 360.0f;
+    float newTempDeg = roundf(tempPct * 360.0f);
+    float oldTempDeg = roundf(s_lastTempPct * 360.0f);
 
     if (newTempDeg > oldTempDeg)
     {
@@ -917,7 +963,7 @@ static int ringHoleHalfWidth(int absDy)
     {
       drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, tempOuterR, tempInnerR, newTempDeg, oldTempDeg, COL_BG);
     }
-    s_lastTempPct = tempPct;
+    s_lastTempPct = newTempDeg / 360.0f;
 
     // Text rows - each is its own self-contained strip. drawTextRow() only
     // actually repaints a row when its text/color changed since last call
