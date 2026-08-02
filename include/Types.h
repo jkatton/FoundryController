@@ -62,6 +62,20 @@ struct AppSettings {
                                                   // - directions are still polled every loop as usual, just not acted
                                                   // on, so debounce/repeat state stays correct for whenever this is
                                                   // switched back on
+  bool swapButtons = false;                       // when true, physical Button A takes on Button B's role and vice
+                                                  // versa - see InputManager::setButtonsSwapped(), which is what
+                                                  // actually performs the swap (pollButtonA()/pollButtonB() just read
+                                                  // from the other physical pin), and BUTTON_A_LABEL/BUTTON_B_LABEL
+                                                  // in config.h, which is what the on-screen hint text (e.g.
+                                                  // "<A>:next") is built from, so it always names whichever physical
+                                                  // button currently performs that role. Deliberately NOT
+                                                  // live-previewed while being edited on the settings screen itself
+                                                  // (unlike screenRotation/gaugeStyleFlat/serialDebug/relayTestMode)
+                                                  // - swapping the very buttons used to navigate/save/discard the
+                                                  // settings screen out from under the user mid-edit would be
+                                                  // disorienting, so this only takes effect once the draft is saved
+                                                  // (see main.cpp's exitSettingsSave()) - same reasoning/pattern as
+                                                  // tableOrientation and moveButtonsEnabled above.
 };
 
 // HP adjustment mode within the detail screen

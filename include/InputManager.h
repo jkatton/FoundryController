@@ -26,6 +26,20 @@ namespace InputManager {
   void setDebugEnabled(bool enabled);
   bool debugEnabled();
 
+  // Runtime toggle for "Swap A/B" on the settings screen - defaults to
+  // false (no swap). When true, pollButtonA()/pollButtonB() below read
+  // from each other's physical PCF8575 pin, so Button A's physical switch
+  // starts reporting the events Button B used to (and vice versa),
+  // including the quadrature-quirk masking that's specific to the
+  // encoder's own center-push pin (see anyDirectionRawPressed() in the
+  // .cpp) - that masking stays tied to the physical pin it's wired to,
+  // not to whichever logical role currently reads it. Display.cpp's
+  // labelA()/labelB() call buttonsSwapped() too, so on-screen hint text
+  // (e.g. "<A>:next") always names whichever physical button currently
+  // performs that role.
+  void setButtonsSwapped(bool swapped);
+  bool buttonsSwapped();
+
   // Returns accumulated encoder steps (positive = clockwise) since the last
   // call, then resets the internal counter to zero. Safe to call every loop.
   enum class EncoderProfile : uint8_t { NORMAL, IP_ENTRY };

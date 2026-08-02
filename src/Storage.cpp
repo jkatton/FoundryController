@@ -55,11 +55,11 @@ void clearRelayAddress() {
 }
 
 // Fixed-order CSV, one field per setting, in the same order as
-// AppSettings' members: "rotation,gaugeFlat,serialDebug,relayTestMode,circleRadius,tableOrientation,moveButtonsEnabled".
+// AppSettings' members: "rotation,gaugeFlat,serialDebug,relayTestMode,circleRadius,tableOrientation,moveButtonsEnabled,swapButtons".
 // Same reasoning as the relay address above - this is deliberately a
 // single small text file rather than anything more general, since the
 // settings list is short and known at compile time.
-static const int SETTINGS_FIELD_COUNT = 7;
+static const int SETTINGS_FIELD_COUNT = 8;
 
 bool loadSettings(AppSettings &out) {
   if (!LittleFS.exists(SETTINGS_CONFIG_PATH)) return false;
@@ -141,6 +141,12 @@ bool loadSettings(AppSettings &out) {
       out.moveButtonsEnabled = (fields[6].toInt() != 0);
     }
   }
+  if (fieldCount > 7) {
+    fields[7].trim();
+    if (fields[7].length() > 0) {
+      out.swapButtons = (fields[7].toInt() != 0);
+    }
+  }
 
   return true;
 }
@@ -161,6 +167,8 @@ void saveSettings(const AppSettings &s) {
   f.print(s.tableOrientation);
   f.print(',');
   f.print(s.moveButtonsEnabled ? 1 : 0);
+  f.print(',');
+  f.print(s.swapButtons ? 1 : 0);
   f.close();
 }
 

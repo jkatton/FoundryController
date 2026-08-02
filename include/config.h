@@ -186,3 +186,19 @@
 #define SCREEN_H 240
 #define SCREEN_CX 120
 #define SCREEN_CY 120
+
+// Single-character labels used to build the on-screen button hint text
+// (e.g. "<A>:next", "[B]:back" - see Display.cpp's shortLabel()/
+// longLabel()/doubleLabel() helpers). Defined here, in one place, rather
+// than hardcoded inline throughout Display.cpp's hint strings, purely so
+// a future relabeling (different silkscreen, different physical buttons)
+// only requires changing these two lines.
+//
+// This is cosmetic only - it does NOT control which physical button does
+// what. That's AppSettings::swapButtons (Types.h) and
+// InputManager::setButtonsSwapped(); Display.cpp combines the two,
+// picking whichever of these two labels currently names the physical
+// button performing a given role (see Display.cpp's labelA()/labelB()).
+//
+#define BUTTON_A_LABEL 'X'
+#define BUTTON_B_LABEL 'O'

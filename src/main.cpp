@@ -241,6 +241,24 @@ static String settingValueMoveButtons(const AppSettings &s)
   return s.moveButtonsEnabled ? "On" : "Off";
 }
 
+static void settingApplySwapButtons(AppSettings &s, int32_t delta)
+{
+  // Only two states - any turn just flips it, regardless of direction or
+  // magnitude. Deliberately NOT applied to InputManager here (unlike e.g.
+  // settingApplySerialDebug above) - see AppSettings::swapButtons' own
+  // comment (Types.h) for why this one only takes effect on save, in
+  // exitSettingsSave() below, rather than live-previewing.
+  if (delta != 0)
+  {
+    s.swapButtons = !s.swapButtons;
+  }
+}
+
+static String settingValueSwapButtons(const AppSettings &s)
+{
+  return s.swapButtons ? "On" : "Off";
+}
+
 static const SettingDescriptor SETTINGS_TABLE[] = {
     {"Screen rotation", settingApplyRotation, settingValueRotation},
     {"HP gauge style", settingApplyGaugeStyle, settingValueGaugeStyle},
@@ -248,6 +266,7 @@ static const SettingDescriptor SETTINGS_TABLE[] = {
     {"Local Relay Test Mode", settingApplyRelayTestMode, settingValueRelayTestMode},
     {"Table Orientation", settingApplyTableOrientation, settingValueTableOrientation},
     {"Move Buttons", settingApplyMoveButtons, settingValueMoveButtons},
+    {"Swap A/B", settingApplySwapButtons, settingValueSwapButtons},
 };
 static const int SETTINGS_COUNT = sizeof(SETTINGS_TABLE) / sizeof(SETTINGS_TABLE[0]);
 
@@ -381,6 +400,10 @@ static void exitSettingsSave()
 {
   g_settings = g_settingsDraft;
   Storage::saveSettings(g_settings);
+  // Unlike rotation/gauge style/debug/relay test mode above (applied live
+  // as they're edited), swapButtons is only applied here, once the draft
+  // is actually saved - see AppSettings::swapButtons' own comment.
+  InputManager::setButtonsSwapped(g_settings.swapButtons);
   enterIpEntryDefaults();
 }
 
@@ -1321,6 +1344,7 @@ void setup()
   Display::setGaugeStyleFlat(g_settings.gaugeStyleFlat);
   InputManager::setDebugEnabled(g_settings.serialDebug);
   RelayClient::setTestMode(g_settings.relayTestMode);
+  InputManager::setButtonsSwapped(g_settings.swapButtons);
   g_circleRadius = g_settings.circleRadius; // last radius used in circle mode, if any (see g_circleRadius' own comment)
 
   InputManager::begin();

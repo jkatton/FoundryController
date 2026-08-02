@@ -50,6 +50,20 @@ namespace Display
   static uint8_t s_currentRotation = 2;
   static bool s_gaugeStyleFlat = true;
 
+  // BUTTON_A_LABEL/BUTTON_B_LABEL (config.h) name the two physical
+  // buttons; labelA()/labelB() below pick whichever of the two currently
+  // performs a given logical role, per InputManager::buttonsSwapped() -
+  // see AppSettings::swapButtons' comment (Types.h) for why the swap
+  // itself lives there rather than here. Every on-screen button hint
+  // (e.g. "<A>:next") is built through these four helpers rather than
+  // ever spelling out "A"/"B" inline, so both the label characters
+  // themselves (config.h) and the current swap state stay in one place.
+  static char labelA() { return InputManager::buttonsSwapped() ? BUTTON_B_LABEL : BUTTON_A_LABEL; }
+  static char labelB() { return InputManager::buttonsSwapped() ? BUTTON_A_LABEL : BUTTON_B_LABEL; }
+  static String shortLabel(char c) { return "<" + String(c) + ">"; }
+  static String longLabel(char c) { return "[" + String(c) + "]"; }
+  static String doubleLabel(char c) { return "<" + String(c) + String(c) + ">"; }
+
   static bool sameCharacterData(const Character &a, const Character &b)
   {
     return a.uuid == b.uuid && a.name == b.name && a.hp == b.hp &&
@@ -340,8 +354,8 @@ static int ringHoleHalfWidth(int absDy)
 
     tft.setTextSize(1);
     tft.setTextColor(COL_DIM, COL_BG);
-    tft.drawString("<A>:next [A]:go", SCREEN_CX, 200);
-    tft.drawString("[B]:settings", SCREEN_CX, 215);
+    tft.drawString(shortLabel(labelA()) + ":next " + longLabel(labelA()) + ":go", SCREEN_CX, 200);
+    tft.drawString(longLabel(labelB()) + ":settings", SCREEN_CX, 215);
 
     if (fakery)
     {
@@ -405,8 +419,8 @@ static int ringHoleHalfWidth(int absDy)
     tft.setTextSize(1);
     tft.setTextColor(COL_DIM, COL_BG);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString("(o):change <A>:next", SCREEN_CX, 200);
-    tft.drawString("[A]:save [B]:back", SCREEN_CX, 215);
+    tft.drawString("(o):change " + shortLabel(labelA()) + ":next", SCREEN_CX, 200);
+    tft.drawString(longLabel(labelA()) + ":save " + longLabel(labelB()) + ":back", SCREEN_CX, 215);
   }
 
   void showCharacterList(const std::vector<Character> &chars, int selectedIndex)
@@ -490,8 +504,8 @@ static int ringHoleHalfWidth(int absDy)
     tft.setTextSize(1);
     tft.setTextColor(COL_DIM, COL_BG);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString("<A>: select", SCREEN_CX, 200);
-    tft.drawString("[B]: IP input", SCREEN_CX, 215);
+    tft.drawString(shortLabel(labelA()) + ": select", SCREEN_CX, 200);
+    tft.drawString(longLabel(labelB()) + ": IP input", SCREEN_CX, 215);
 
     s_listValid = true;
     s_lastListChars = chars;
@@ -992,9 +1006,9 @@ static int ringHoleHalfWidth(int absDy)
       }
       else
       {
-        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "<A>/<B>:back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
+        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + "/" + shortLabel(labelB()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
       }
-      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "[A]/[B]:draw", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, longLabel(labelA()) + "/" + longLabel(labelB()) + ":draw", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
       return;
     }
 
@@ -1018,9 +1032,9 @@ static int ringHoleHalfWidth(int absDy)
       }
       else
       {
-        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "<A>:move [A]:back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
+        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + ":move " + longLabel(labelA()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
       }
-      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "<B>:ring", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, shortLabel(labelB()) + ":ring", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
       return;
     }
 
@@ -1073,14 +1087,14 @@ static int ringHoleHalfWidth(int absDy)
     }
     else
     {
-      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "<A>:send HP [A]:back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
+      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + ":send HP " + longLabel(labelA()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
       if (addTarget == HpAddTarget::TEMP)
       {
-        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "<AA>:reg hp", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, doubleLabel(labelA()) + ":reg hp", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
       }
       else
       {
-        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, "<AA>:temp hp", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, doubleLabel(labelA()) + ":temp hp", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
       }
     }
   }

@@ -14,6 +14,15 @@ namespace InputManager
   void setDebugEnabled(bool enabled) { s_debugEnabled = enabled; }
   bool debugEnabled() { return s_debugEnabled; }
 
+  // Runtime-editable (see setButtonsSwapped()/buttonsSwapped(), and the
+  // "Swap A/B" entry on the settings screen) - defaults to false (no
+  // swap), same pattern as s_debugEnabled above. Read by pollButtonA()/
+  // pollButtonB() further down.
+  static bool s_buttonsSwapped = false;
+
+  void setButtonsSwapped(bool swapped) { s_buttonsSwapped = swapped; }
+  bool buttonsSwapped() { return s_buttonsSwapped; }
+
   // ---------------------------------------------------------------------
   // Rotary encoder - interrupt driven quadrature decode
   // ---------------------------------------------------------------------
@@ -361,8 +370,18 @@ namespace InputManager
            !((exp >> EXP_PIN_JOY_RIGHT) & 0x01);
   }
 
-  ButtonEvent pollButtonA() { return pollButton(s_btnA, anyDirectionRawPressed()); }
-  ButtonEvent pollButtonB() { return pollButton(s_btnB); }
+  // s_btnA is the physical pin with the direction-quirk masking (see
+  // anyDirectionRawPressed() above) - that's a property of the encoder's
+  // own center-push pin, so it stays applied to s_btnA regardless of
+  // which logical role (A or B) is currently reading it.
+  ButtonEvent pollButtonA()
+  {
+    return s_buttonsSwapped ? pollButton(s_btnB) : pollButton(s_btnA, anyDirectionRawPressed());
+  }
+  ButtonEvent pollButtonB()
+  {
+    return s_buttonsSwapped ? pollButton(s_btnA, anyDirectionRawPressed()) : pollButton(s_btnB);
+  }
 
   // Direction switches (joystick tilt) are always instant, single-shot
   // presses - unlike buttons A/B, there's no long-press or double-press
