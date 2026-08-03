@@ -446,7 +446,7 @@ static int ringHoleHalfWidth(int absDy)
     tft.setTextSize(1);
     tft.setTextColor(COL_DIM, COL_BG);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString("(o):change " + shortLabel(labelA()) + ":next", SCREEN_CX, 200);
+    tft.drawString(shortLabel(labelA()) + ":next", SCREEN_CX, 200);
     tft.drawString(longLabel(labelA()) + ":save " + longLabel(labelB()) + ":back", SCREEN_CX, 215);
   }
 
