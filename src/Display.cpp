@@ -56,14 +56,14 @@ namespace Display
   // performs a given logical role, per InputManager::buttonsSwapped() -
   // see AppSettings::swapButtons' comment (Types.h) for why the swap
   // itself lives there rather than here. Every on-screen button hint
-  // (e.g. "<A>:next") is built through these four helpers rather than
+  // (e.g. ">A<:next") is built through these four helpers rather than
   // ever spelling out "A"/"B" inline, so both the label characters
   // themselves (config.h) and the current swap state stay in one place.
   static char labelA() { return InputManager::buttonsSwapped() ? BUTTON_B_LABEL : BUTTON_A_LABEL; }
   static char labelB() { return InputManager::buttonsSwapped() ? BUTTON_A_LABEL : BUTTON_B_LABEL; }
-  static String shortLabel(char c) { return "<" + String(c) + ">"; }
+  static String shortLabel(char c) { return ">" + String(c) + "<"; }
   static String longLabel(char c) { return "[" + String(c) + "]"; }
-  static String doubleLabel(char c) { return "<" + String(c) + String(c) + ">"; }
+  static String doubleLabel(char c) { return ">" + String(c) + String(c) + "<"; }
 
   static bool sameCharacterData(const Character &a, const Character &b)
   {
@@ -1080,7 +1080,7 @@ static int ringHoleHalfWidth(int absDy)
       {
         drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + ":move " + longLabel(labelA()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
       }
-      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, shortLabel(labelB()) + ":ring", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, circle.enabled ? (shortLabel(labelB()) + ":ring") : String(""), 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
       return;
     }
 

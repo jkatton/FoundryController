@@ -247,6 +247,21 @@ static String settingValueMoveButtons(const AppSettings &s)
   return s.moveButtonsEnabled ? "On" : "Off";
 }
 
+static void settingApplyCircleEnabled(AppSettings &s, int32_t delta)
+{
+  // Only two states - any turn just flips it, regardless of direction or
+  // magnitude.
+  if (delta != 0)
+  {
+    s.circleEnabled = !s.circleEnabled;
+  }
+}
+
+static String settingValueCircleEnabled(const AppSettings &s)
+{
+  return s.circleEnabled ? "On" : "Off";
+}
+
 static void settingApplySwapButtons(AppSettings &s, int32_t delta)
 {
   // Only two states - any turn just flips it, regardless of direction or
@@ -272,7 +287,8 @@ static const SettingDescriptor SETTINGS_TABLE[] = {
     {"Local Relay Test Mode", settingApplyRelayTestMode, settingValueRelayTestMode},
     {"Table Orientation", settingApplyTableOrientation, settingValueTableOrientation},
     {"Move Buttons", settingApplyMoveButtons, settingValueMoveButtons},
-    {"Swap A/B", settingApplySwapButtons, settingValueSwapButtons},
+    {"Circle Feature", settingApplyCircleEnabled, settingValueCircleEnabled},
+    {"Swap X/O", settingApplySwapButtons, settingValueSwapButtons},
 };
 static const int SETTINGS_COUNT = sizeof(SETTINGS_TABLE) / sizeof(SETTINGS_TABLE[0]);
 
@@ -920,6 +936,7 @@ static CircleIndicator currentCircleIndicator()
   ci.units = g_moveUnits; // best-effort guess from the last move preview this session, if any - the relay
                           // doesn't tell us a scene's distance units any other way (see Types.h)
   ci.sending = g_circleSending;
+  ci.enabled = g_settings.circleEnabled;
   return ci;
 }
 
@@ -1062,15 +1079,22 @@ static void handleCharacterDetail()
   // exits radius-editing but leaves the circle exactly as drawn (see
   // circleButtonLongPress()). Checked first so neither can also fall
   // through and register as anything else below in the same tick.
-  if (b == ButtonEvent::LONG_PRESS)
+  //
+  // Gated on g_settings.circleEnabled ("Circle Feature" on the settings
+  // screen) - Button B is still polled every loop above regardless, but
+  // its presses are dropped here when the setting is off.
+  if (g_settings.circleEnabled)
   {
-    circleButtonLongPress();
-    return;
-  }
-  if (b == ButtonEvent::SHORT_PRESS)
-  {
-    circleButtonShortPress();
-    return;
+    if (b == ButtonEvent::LONG_PRESS)
+    {
+      circleButtonLongPress();
+      return;
+    }
+    if (b == ButtonEvent::SHORT_PRESS)
+    {
+      circleButtonShortPress();
+      return;
+    }
   }
 
 

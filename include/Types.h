@@ -76,6 +76,12 @@ struct AppSettings {
                                                   // disorienting, so this only takes effect once the draft is saved
                                                   // (see main.cpp's exitSettingsSave()) - same reasoning/pattern as
                                                   // tableOrientation and moveButtonsEnabled above.
+  bool circleEnabled = true;                      // when false, Button B presses on the character detail screen are
+                                                  // ignored entirely (see main.cpp's handleCharacterDetail()) so
+                                                  // circle mode can't be opened, and the ":ring" hint is hidden
+                                                  // (CircleIndicator::enabled). Button B is still polled every loop
+                                                  // as usual so its debounce state stays correct - same pattern as
+                                                  // moveButtonsEnabled above.
 };
 
 // HP adjustment mode within the detail screen
@@ -111,6 +117,7 @@ struct CircleIndicator {
   float radius = 0;        // current radius, in the scene's own distance units
   String units;            // best-effort guess at those units (empty if not yet known - see main.cpp)
   bool sending = false;    // a previewCircle() call is in flight
+  bool enabled = true;     // mirrors AppSettings::circleEnabled - when false, Display hides the circle-mode ("ring") hint
 };
 
 // Button press classification
