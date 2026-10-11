@@ -24,6 +24,10 @@ enum class AppState {
   CHARACTER_DETAIL,
   SETTINGS,                 // carousel of user-editable settings, reached by
                              // long-pressing button B from IP_ENTRY
+  WIFI_LIST,                // scrollable list of saved WiFi networks (delete individual ones),
+                             // reached from the "Saved WiFi" row of the settings carousel
+  OTA_UPDATE,               // waiting for / receiving an OTA firmware upload, reached
+                             // from the "Firmware Update" row of the settings carousel
   ERROR_SCREEN
 };
 

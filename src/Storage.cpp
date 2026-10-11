@@ -180,4 +180,87 @@ void saveSettings(const AppSettings &s) {
   f.close();
 }
 
+// ---------------------------------------------------------------------
+// Saved WiFi networks: one "ssid<TAB>password" line per network, oldest
+// first. Tab is the separator (rather than a comma like the other config
+// files) since commas are common in SSIDs/passwords; entries containing a
+// tab or newline are simply refused on save.
+// ---------------------------------------------------------------------
+bool loadWifiNetworks(std::vector<WifiCred> &out) {
+  out.clear();
+  if (!LittleFS.exists(WIFI_CONFIG_PATH)) return false;
+
+  File f = LittleFS.open(WIFI_CONFIG_PATH, "r");
+  if (!f) return false;
+  while (f.available() && (int)out.size() < MAX_WIFI_NETWORKS) {
+    String line = f.readStringUntil('\n');
+    line.replace("\r", "");
+    if (line.length() == 0) continue;
+    int tab = line.indexOf('\t');
+    WifiCred c;
+    c.ssid = (tab < 0) ? line : line.substring(0, tab);
+    c.pass = (tab < 0) ? String("") : line.substring(tab + 1);
+    if (c.ssid.length() == 0) continue;
+    out.push_back(c);
+  }
+  f.close();
+  return !out.empty();
+}
+
+static void writeWifiNetworks(const std::vector<WifiCred> &nets) {
+  File f = LittleFS.open(WIFI_CONFIG_PATH, "w");
+  if (!f) return;
+  for (size_t i = 0; i < nets.size(); i++) {
+    f.print(nets[i].ssid);
+    f.print('\t');
+    f.print(nets[i].pass);
+    f.print('\n');
+  }
+  f.close();
+}
+
+static bool wifiFieldOk(const String &s) {
+  return s.indexOf('\t') < 0 && s.indexOf('\n') < 0 && s.indexOf('\r') < 0;
+}
+
+void addWifiNetwork(const String &ssid, const String &pass) {
+  if (ssid.length() == 0 || !wifiFieldOk(ssid) || !wifiFieldOk(pass)) return;
+
+  std::vector<WifiCred> nets;
+  loadWifiNetworks(nets);
+  for (size_t i = 0; i < nets.size(); i++) {
+    if (nets[i].ssid == ssid) {
+      nets.erase(nets.begin() + i);
+      break;
+    }
+  }
+  WifiCred c;
+  c.ssid = ssid;
+  c.pass = pass;
+  nets.push_back(c);
+  while ((int)nets.size() > MAX_WIFI_NETWORKS) nets.erase(nets.begin());
+  writeWifiNetworks(nets);
+}
+
+void removeWifiNetwork(const String &ssid) {
+  std::vector<WifiCred> nets;
+  loadWifiNetworks(nets);
+  for (size_t i = 0; i < nets.size(); i++) {
+    if (nets[i].ssid == ssid) {
+      nets.erase(nets.begin() + i);
+      break;
+    }
+  }
+  writeWifiNetworks(nets); // writes an empty file if that was the last one - see wifiConfigExists()
+}
+
+void clearWifiNetworks() {
+  std::vector<WifiCred> none;
+  writeWifiNetworks(none);
+}
+
+bool wifiConfigExists() {
+  return LittleFS.exists(WIFI_CONFIG_PATH);
+}
+
 } // namespace Storage

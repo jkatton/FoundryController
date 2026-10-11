@@ -336,6 +336,26 @@ static int ringHoleHalfWidth(int absDy)
     centeredText(tft, "Press any button to go back", 160, 1, COL_DIM);
   }
 
+  void showOtaStatus(const String &line1, const String &line2)
+  {
+    s_listValid = false;
+    tft.fillScreen(COL_BG);
+    centeredText(tft, "Firmware Update", 70, 1, COL_ACCENT);
+    centeredText(tft, line1, 105, 1, COL_TEXT);
+    centeredText(tft, line2, 125, 1, COL_TEXT);
+    centeredText(tft, "Hold any button to cancel", 190, 1, COL_DIM);
+  }
+
+  void showOtaProgress(int percent)
+  {
+    percent = constrain(percent, 0, 100);
+    const int x = 40, y = 145, w = 160, h = 12;
+    tft.fillRect(x, y, w, h, COL_TRACK);
+    tft.fillRect(x, y, (w * percent) / 100, h, COL_HP_GOOD);
+    tft.fillRect(x, y + 20, w, 10, COL_BG); // clear the previous number
+    centeredText(tft, String(percent) + "%", y + 25, 1, COL_TEXT);
+  }
+
   void showLoadingCharacters()
   {
     s_listValid = false;
@@ -448,6 +468,72 @@ static int ringHoleHalfWidth(int absDy)
     tft.setTextDatum(MC_DATUM);
     tft.drawString(shortLabel(labelA()) + ":next", SCREEN_CX, 200);
     tft.drawString(longLabel(labelA()) + ":save " + longLabel(labelB()) + ":back", SCREEN_CX, 215);
+  }
+
+  void showWifiList(const std::vector<String> &ssids, const std::vector<String> &notes,
+                    int selectedIndex, bool confirmDelete)
+  {
+    s_listValid = false;
+    s_lastListSelectedIndex = -1;
+    s_lastDetailUuid = "";
+
+    tft.fillScreen(COL_BG);
+    centeredText(tft, "Saved WiFi", 30, 1, COL_ACCENT);
+
+    int n = ssids.size();
+    if (n == 0)
+    {
+      centeredText(tft, "No saved networks", 110, 1, COL_TEXT);
+    }
+    else
+    {
+      if (selectedIndex < 0)
+        selectedIndex = 0;
+      if (selectedIndex >= n)
+        selectedIndex = n - 1;
+
+      int rowH = 48;
+      int centerY = 110;
+      for (int offset = -1; offset <= 1; offset++)
+      {
+        int idx = selectedIndex + offset;
+        if (idx < 0 || idx >= n)
+          continue;
+
+        int y = centerY + offset * rowH;
+        bool isSel = (offset == 0);
+
+        tft.setTextDatum(MC_DATUM);
+        // SSIDs can be up to 32 chars - only the selected row gets the big
+        // font, and only when the name is short enough to fit.
+        uint8_t size = (isSel && ssids[idx].length() <= 15) ? 2 : 1;
+        tft.setTextSize(size);
+        tft.setTextColor(isSel ? COL_ACCENT : COL_DIM, COL_BG);
+        tft.drawString(ssids[idx], SCREEN_CX, y - (isSel ? 6 : 0));
+
+        if (isSel)
+        {
+          tft.setTextSize(1);
+          if (confirmDelete)
+          {
+            tft.setTextColor(COL_HP_BAD, COL_BG);
+            tft.drawString("Press again to delete", SCREEN_CX, y + 18);
+          }
+          else if (notes[idx].length() > 0)
+          {
+            tft.setTextColor(COL_HP_GOOD, COL_BG);
+            tft.drawString(notes[idx], SCREEN_CX, y + 18);
+          }
+        }
+      }
+    }
+
+    tft.setTextSize(1);
+    tft.setTextColor(COL_DIM, COL_BG);
+    tft.setTextDatum(MC_DATUM);
+    if (n > 0)
+      tft.drawString(shortLabel(labelA()) + ":next " + shortLabel(labelB()) + ":delete", SCREEN_CX, 200);
+    tft.drawString(longLabel(labelA()) + "/" + longLabel(labelB()) + ":back", SCREEN_CX, 215);
   }
 
   void showCharacterList(const std::vector<Character> &chars, int selectedIndex)
@@ -1046,14 +1132,10 @@ static int ringHoleHalfWidth(int absDy)
       String radiusStr = formatDistanceFt(circle.radius);
       drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, radiusStr, 4, COL_CIRCLE, forceRowsRedraw, 30);
 
-      if (circle.sending)
-      {
-        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Updating...", 1, COL_ACCENT, forceRowsRedraw, 0, statusRow1HalfWidth);
-      }
-      else
-      {
-        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + "/" + shortLabel(labelB()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
-      }
+      // No "Updating..." status while the radius preview is in flight - it
+      // only flashed for a moment on every radius change, so the hint row
+      // just stays put (circle.sending is still set by main.cpp, but unused here).
+      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + "/" + shortLabel(labelB()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
       drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, longLabel(labelA()) + "/" + longLabel(labelB()) + ":draw", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
       return;
     }
@@ -1072,14 +1154,9 @@ static int ringHoleHalfWidth(int absDy)
       String distStr = formatDistanceFt(move.distance);
       drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, distStr, 4, COL_ACCENT, forceRowsRedraw, 30);
 
-      if (move.sending)
-      {
-        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Moving...", 1, COL_ACCENT, forceRowsRedraw, 0, statusRow1HalfWidth);
-      }
-      else
-      {
-        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + ":move " + longLabel(labelA()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
-      }
+      // No "Moving..." status while a preview is in flight - same reasoning
+      // as the circle branch above; the hint row just stays put.
+      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + ":move " + longLabel(labelA()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
       drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, circle.enabled ? (shortLabel(labelB()) + ":ring") : String(""), 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
       return;
     }

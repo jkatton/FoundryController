@@ -38,6 +38,12 @@ namespace Display {
 
   void showLoadingCharacters();
 
+  // OTA firmware-update screens. showOtaStatus() is a full repaint;
+  // showOtaProgress() only redraws the progress bar/percentage so it
+  // doesn't flicker while an upload is streaming in.
+  void showOtaStatus(const String &line1, const String &line2);
+  void showOtaProgress(int percent);
+
   // Settings carousel: one row per user-editable setting, names[i]/values[i]
   // paired by index, in carousel order. selectedIndex is the row drawn
   // highlighted in the middle - same windowed-carousel look as
@@ -45,6 +51,13 @@ namespace Display {
   // actually does; main.cpp's SETTINGS_TABLE owns that, so adding a new
   // setting never requires touching this function.
   void showSettings(const std::vector<String> &names, const std::vector<String> &values, int selectedIndex);
+
+  // Saved-WiFi list: ssids[i]/notes[i] paired by index (notes[i] is a short
+  // extra line such as "connected", may be empty). Same windowed carousel
+  // look as showSettings(). confirmDelete swaps the selected row's note for
+  // a "press again to delete" prompt.
+  void showWifiList(const std::vector<String> &ssids, const std::vector<String> &notes,
+                    int selectedIndex, bool confirmDelete);
 
   // scrollOffset/selectedIndex let the caller manage a simple windowed list.
   void showCharacterList(const std::vector<Character> &chars, int selectedIndex);

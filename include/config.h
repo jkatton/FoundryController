@@ -172,6 +172,15 @@
 // LittleFS path used to remember the relay address across reboots
 #define RELAY_CONFIG_PATH "/relay.cfg"
 
+// LittleFS path holding the saved WiFi networks (one "ssid<TAB>password"
+// line each, oldest first) - see Storage::loadWifiNetworks() and main.cpp's
+// connectWifi(). At boot every saved network is handed to
+// ESP8266WiFiMulti, which connects to the strongest one currently in range;
+// only if none connect does the WiFiManager config portal open.
+#define WIFI_CONFIG_PATH "/wifi.cfg"
+#define MAX_WIFI_NETWORKS 5            // oldest entry is dropped when a new one is added past this
+#define WIFI_MULTI_TIMEOUT_MS 10000    // how long to wait for a saved network to connect before opening the portal
+
 // LittleFS path used to remember user settings (screen rotation, gauge
 // style, ...) across reboots - see Storage::loadSettings/saveSettings and
 // the settings carousel reached by long-pressing button B from the IP

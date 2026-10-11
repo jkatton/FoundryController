@@ -2,6 +2,10 @@
 
 #include <ESP8266WiFi.h>
 #include <WiFiManager.h>
+#include <ArduinoOTA.h>
+#include <ESP8266WiFiMulti.h>
+#include <ESP8266WebServer.h>
+#include <ESP8266HTTPUpdateServer.h>
 
 #include "config.h"
 #include "Types.h"
@@ -150,6 +154,7 @@ struct SettingDescriptor
   const char *name;
   void (*applyDelta)(AppSettings &s, int32_t delta); // called with nonzero encoder delta; should live-preview via Display::set*()
   String (*valueString)(const AppSettings &s);
+  void (*onActivate)(); // optional (null for plain settings): run when Button B is short-pressed on this row
 };
 
 static void settingApplyRotation(AppSettings &s, int32_t delta)
@@ -280,15 +285,58 @@ static String settingValueSwapButtons(const AppSettings &s)
   return s.swapButtons ? "On" : "Off";
 }
 
+static void startOta(); // defined below, alongside handleSettings()
+static void startAddWifi();
+static void openWifiList();
+
+static void settingApplyNoop(AppSettings &s, int32_t delta)
+{
+  // Action row, not an editable value - handled via onActivate.
+}
+
+static String pressBLabel()
+{
+  // Names whichever physical button currently performs the "B" role.
+  return String("Press ") + (InputManager::buttonsSwapped() ? BUTTON_A_LABEL : BUTTON_B_LABEL);
+}
+
+static String settingValueAddWifi(const AppSettings &s)
+{
+  return pressBLabel();
+}
+
+static String settingValueSavedWifi(const AppSettings &s)
+{
+  return pressBLabel();
+}
+
+static void settingApplyOta(AppSettings &s, int32_t delta)
+{
+  // Action row, not an editable value - starting OTA is done via onActivate.
+}
+
+static String settingValueOta(const AppSettings &s)
+{
+  // Names whichever physical button currently performs the "B" role.
+  return String("Press ") + (InputManager::buttonsSwapped() ? BUTTON_A_LABEL : BUTTON_B_LABEL);
+}
+
 static const SettingDescriptor SETTINGS_TABLE[] = {
+// Player-facing
     {"Screen rotation", settingApplyRotation, settingValueRotation},
-    {"HP gauge style", settingApplyGaugeStyle, settingValueGaugeStyle},
-    {"Serial Debug Output", settingApplySerialDebug, settingValueSerialDebug},
-    {"Local Relay Test Mode", settingApplyRelayTestMode, settingValueRelayTestMode},
     {"Table Orientation", settingApplyTableOrientation, settingValueTableOrientation},
     {"Move Buttons", settingApplyMoveButtons, settingValueMoveButtons},
     {"Circle Feature", settingApplyCircleEnabled, settingValueCircleEnabled},
     {"Swap X/O", settingApplySwapButtons, settingValueSwapButtons},
+    {"HP gauge style", settingApplyGaugeStyle, settingValueGaugeStyle},
+    // Debug / test
+    {"Serial Debug Output", settingApplySerialDebug, settingValueSerialDebug},
+    {"Local Relay Test Mode", settingApplyRelayTestMode, settingValueRelayTestMode},
+    // Network
+    {"Saved WiFi", settingApplyNoop, settingValueSavedWifi, openWifiList},
+    {"Add WiFi Network", settingApplyNoop, settingValueAddWifi, startAddWifi},
+    // Update
+    {"Firmware Update", settingApplyOta, settingValueOta, startOta},
 };
 static const int SETTINGS_COUNT = sizeof(SETTINGS_TABLE) / sizeof(SETTINGS_TABLE[0]);
 
@@ -597,6 +645,216 @@ static void handleIpEntry()
   }
 }
 
+// ---------------------------------------------------------------------
+// WiFi: multiple saved networks
+// ---------------------------------------------------------------------
+// Opens the WiFiManager config portal and, if it ends up connected, adds
+// that network to the saved list. startConfigPortal() rather than
+// autoConnect(): autoConnect would first waste time re-trying the one
+// network the SDK remembers, which the caller has already dealt with.
+static bool runWifiPortal()
+{
+  Display::showWifiPortalHint();
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(WIFI_PORTAL_TIMEOUT_S);
+  bool ok = wm.startConfigPortal("FoundryController-Setup"); // blocks until configured or timed out
+  if (ok && WiFi.status() == WL_CONNECTED)
+  {
+    Storage::addWifiNetwork(WiFi.SSID(), WiFi.psk());
+    return true;
+  }
+  return false;
+}
+
+// Boot-time connect: try every saved network (ESP8266WiFiMulti scans and
+// joins the strongest one in range), and only open the config portal if
+// none of them connect.
+static bool connectWifi()
+{
+  WiFi.mode(WIFI_STA);
+
+  std::vector<WifiCred> nets;
+  Storage::loadWifiNetworks(nets);
+
+  // One-time migration: if there's no wifi.cfg yet but the SDK still
+  // remembers a network from before multi-network support, adopt it.
+  if (nets.empty() && !Storage::wifiConfigExists() && WiFi.SSID().length() > 0)
+  {
+    Storage::addWifiNetwork(WiFi.SSID(), WiFi.psk());
+    Storage::loadWifiNetworks(nets);
+  }
+
+  if (!nets.empty())
+  {
+    Display::showBoot("Looking for WiFi...");
+    ESP8266WiFiMulti multi;
+    for (size_t i = 0; i < nets.size(); i++)
+      multi.addAP(nets[i].ssid.c_str(), nets[i].pass.c_str());
+    if (multi.run(WIFI_MULTI_TIMEOUT_MS) == WL_CONNECTED)
+      return true;
+  }
+
+  return runWifiPortal();
+}
+
+// Settings row: open the portal on demand to add another network, even
+// though a saved one may be working. Always restarts afterwards so the
+// normal boot-time connect picks the best network from the updated list
+// (any unsaved settings draft is discarded, same as OTA).
+static void startAddWifi()
+{
+  runWifiPortal();
+  Display::showBoot("Restarting...");
+  delay(1000);
+  ESP.restart();
+}
+
+// ---- Saved WiFi list (reached from the "Saved WiFi" settings row) ----
+// Encoder or A:next scrolls, B asks to delete the selected network and a
+// second B press confirms, holding either button returns to settings.
+// Deleting only edits the saved list - it takes effect at the next boot
+// (if the deleted network is the one currently connected, the board stays
+// on it until then).
+static std::vector<WifiCred> g_wifiNets;
+static int g_wifiIndex = 0;
+static bool g_wifiDeleteArmed = false;
+
+static void renderWifiList()
+{
+  std::vector<String> ssids, notes;
+  String current = (WiFi.status() == WL_CONNECTED) ? WiFi.SSID() : String("");
+  for (size_t i = 0; i < g_wifiNets.size(); i++)
+  {
+    ssids.push_back(g_wifiNets[i].ssid);
+    notes.push_back((current.length() > 0 && g_wifiNets[i].ssid == current) ? String("connected") : String(""));
+  }
+  Display::showWifiList(ssids, notes, g_wifiIndex, g_wifiDeleteArmed);
+}
+
+static void openWifiList()
+{
+  Storage::loadWifiNetworks(g_wifiNets);
+  g_wifiIndex = 0;
+  g_wifiDeleteArmed = false;
+  g_state = AppState::WIFI_LIST;
+  renderWifiList();
+}
+
+static void handleWifiList()
+{
+  int n = (int)g_wifiNets.size();
+
+  int32_t delta = InputManager::readEncoderDelta();
+  if (delta != 0 && n > 0)
+  {
+    g_wifiIndex = (int)((((long)g_wifiIndex + delta) % n + n) % n);
+    g_wifiDeleteArmed = false;
+    renderWifiList();
+  }
+
+  ButtonEvent a = InputManager::pollButtonA();
+  ButtonEvent b = InputManager::pollButtonB();
+
+  if (a == ButtonEvent::LONG_PRESS || b == ButtonEvent::LONG_PRESS)
+  {
+    g_state = AppState::SETTINGS;
+    renderSettingsScreen(); // settings draft/selection are untouched, so this just redraws where the user left off
+    return;
+  }
+
+  if (a == ButtonEvent::SHORT_PRESS && n > 0)
+  {
+    g_wifiIndex = (g_wifiIndex + 1) % n;
+    g_wifiDeleteArmed = false;
+    renderWifiList();
+  }
+
+  if (b == ButtonEvent::SHORT_PRESS && n > 0)
+  {
+    if (!g_wifiDeleteArmed)
+    {
+      g_wifiDeleteArmed = true;
+    }
+    else
+    {
+      Storage::removeWifiNetwork(g_wifiNets[g_wifiIndex].ssid);
+      Storage::loadWifiNetworks(g_wifiNets);
+      if (g_wifiIndex >= (int)g_wifiNets.size())
+        g_wifiIndex = (int)g_wifiNets.size() - 1;
+      if (g_wifiIndex < 0)
+        g_wifiIndex = 0;
+      g_wifiDeleteArmed = false;
+    }
+    renderWifiList();
+  }
+}
+
+static int g_otaLastPct = -1;
+
+// Browser-based upload (http://<ip>/update) alongside ArduinoOTA's
+// PlatformIO/espota listener. ArduinoOTA itself has no web page - it only
+// speaks UDP/TCP to the espota tool - so this is what makes the IP shown on
+// the OTA screen actually open in a browser.
+static ESP8266WebServer g_otaWeb(80);
+static ESP8266HTTPUpdateServer g_httpUpdater;
+
+static void startOta()
+{
+  if (WiFi.status() != WL_CONNECTED)
+    return;
+
+  ArduinoOTA.setHostname("foundry-controller");
+  // ArduinoOTA.setPassword("changeme"); // recommended on a shared network
+
+  ArduinoOTA.onStart([]() {
+    g_otaLastPct = -1;
+    Display::showOtaStatus("Receiving update...", "Do not power off");
+    Display::showOtaProgress(0);
+  });
+  ArduinoOTA.onProgress([](unsigned int done, unsigned int total) {
+    int pct = (int)((done * 100UL) / total);
+    if (pct != g_otaLastPct) // only repaint when the number changes
+    {
+      g_otaLastPct = pct;
+      Display::showOtaProgress(pct);
+    }
+  });
+  ArduinoOTA.onEnd([]() {
+    Display::showOtaStatus("Update complete", "Rebooting...");
+  });
+  ArduinoOTA.onError([](ota_error_t err) {
+    Display::showOtaStatus("Update failed", "Error " + String((int)err));
+    delay(3000);
+    ESP.restart();
+  });
+
+  ArduinoOTA.begin();
+
+  // Modem sleep can make the board miss incoming connections/invitations.
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+
+  g_httpUpdater.setup(&g_otaWeb, "/update"); // add ", \"user\", \"pass\"" here to require a login
+  g_otaWeb.on("/", HTTP_GET, []() {
+    g_otaWeb.sendHeader("Location", "/update");
+    g_otaWeb.send(302, "text/plain", "");
+  });
+  g_otaWeb.begin();
+
+  g_state = AppState::OTA_UPDATE;
+  Display::showOtaStatus("http://" + WiFi.localIP().toString() + "/update", "or foundry-controller.local");
+}
+
+static void handleOta()
+{
+  ArduinoOTA.handle();
+  g_otaWeb.handleClient();
+  if (InputManager::pollButtonA() == ButtonEvent::LONG_PRESS ||
+      InputManager::pollButtonB() == ButtonEvent::LONG_PRESS)
+  {
+    ESP.restart(); // simplest clean way out; any unsaved settings draft is discarded
+  }
+}
+
 static void handleSettings()
 {
   int32_t delta = InputManager::readEncoderDelta();
@@ -620,7 +878,14 @@ static void handleSettings()
   }
 
   ButtonEvent b = InputManager::pollButtonB();
-  if (b == ButtonEvent::LONG_PRESS)
+  if (b == ButtonEvent::SHORT_PRESS)
+  {
+    if (SETTINGS_TABLE[g_settingsIndex].onActivate)
+      SETTINGS_TABLE[g_settingsIndex].onActivate();
+    if (g_state == AppState::SETTINGS) // startOta() etc. switch screens; don't paint over them
+      renderSettingsScreen();
+  }
+  else if (b == ButtonEvent::LONG_PRESS)
   {
     exitSettingsDiscard();
     return;
@@ -1251,7 +1516,9 @@ static void handleCharacterDetail()
   // sub-display (g_lastModified): a short press sends it. A long press
   // cancels whichever one is shown (if it actually has anything pending),
   // then swaps to showing the other one if *it* has something pending, or
-  // heads back to the character list if neither does. A double press
+  // heads back to the character list if neither does. (After a cancel, the
+  // shared sub-display moves straight to the other one if it has something
+  // pending, so each long press cancels exactly one thing.) A double press
   // always jumps to (and stays on) HP adjustment, even if move or circle
   // radius-editing was what's currently showing.
   if (a == ButtonEvent::SHORT_PRESS)
@@ -1285,6 +1552,12 @@ static void handleCharacterDetail()
       {
         exitMoveMode(true); // cancel on server
 
+        // If an HP edit is also pending, hand the shared sub-display over
+        // to it right now, so the next long press cancels it directly
+        // instead of first spending a press just swapping to it.
+        if (g_deltaValue != 0)
+          g_lastModified = DetailSubDisplay::HP;
+
         // While the move was pending, a drawn circle was following the
         // move target rather than the token's real position (see
         // nudgeMove()'s re-centering call). Cancelling the move snaps the
@@ -1302,6 +1575,11 @@ static void handleCharacterDetail()
       {
         g_deltaValue = 0;
         g_dirty = false; // nothing left pending here - safe for the background poll to refresh again
+
+        // Mirror of the move case above: if a move is also still pending,
+        // show it next so one more long press cancels it.
+        if (g_moveMode)
+          g_lastModified = DetailSubDisplay::MOVE;
       }
       redrawDetailScreen();
       return;
@@ -1428,11 +1706,8 @@ void setup()
 
   Display::showBoot("Starting WiFi...");
   delay(1000);
-  Display::showWifiPortalHint();
-  WiFiManager wm;
-  wm.setConfigPortalTimeout(WIFI_PORTAL_TIMEOUT_S);
-  // Blocks until connected, portal times out, or user configures WiFi.
-  bool wifiOk = wm.autoConnect("FoundryController-Setup");
+  // Tries every saved network first; opens the config portal only if none connect.
+  bool wifiOk = connectWifi();
 
   if (!wifiOk)
   {
@@ -1476,6 +1751,12 @@ void loop()
     break;
   case AppState::SETTINGS:
     handleSettings();
+    break;
+  case AppState::WIFI_LIST:
+    handleWifiList();
+    break;
+  case AppState::OTA_UPDATE:
+    handleOta();
     break;
   case AppState::ERROR_SCREEN:
     handleErrorScreen();
