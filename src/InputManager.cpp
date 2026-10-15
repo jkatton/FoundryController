@@ -6,7 +6,7 @@ namespace InputManager
 {
 
   // Runtime-editable (see setDebugEnabled()/debugEnabled(), and the
-  // "Serial Debug Output" entry on the settings screen) - defaults to
+  // "Debug Mode" entry on the settings screen) - defaults to
   // INPUT_DEBUG from config.h. Replaces what used to be a compile-time
   // #if INPUT_DEBUG guard around every Serial.printf() below.
   static bool s_debugEnabled = false;
@@ -547,8 +547,11 @@ namespace InputManager
       // just slow expander/bus settling on cold power-on and nothing to
       // worry about; if it never recovers, check wiring/power to the
       // expander and the pull-ups on SDA/SCL.
-      Serial.println("[input] WARNING: PCF8575 did not respond during init after 5 attempts - "
-                     "will keep retrying in the background.");
+      if (s_debugEnabled)
+      {
+        Serial.println("[input] WARNING: PCF8575 did not respond during init after 5 attempts - "
+                       "will keep retrying in the background.");
+      }
     }
 
     s_btnA.expBit = EXP_PIN_ENCODER_BTN;

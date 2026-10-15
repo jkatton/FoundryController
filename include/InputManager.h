@@ -19,10 +19,10 @@ namespace InputManager {
 
   void begin();
 
-  // Runtime toggle for verbose Serial debug output ("Serial Debug Output"
+  // Runtime toggle for verbose Serial debug output ("Debug Mode"
   // on the settings screen) - defaults to INPUT_DEBUG from config.h. Gates
-  // the encoder/button/joystick debug prints below, and the error-message
-  // echo in Display::showError().
+  // all Serial output (encoder/button/joystick prints, init warnings) and,
+  // via main.cpp's goToError(), whether non-fatal error screens are shown.
   void setDebugEnabled(bool enabled);
   bool debugEnabled();
 

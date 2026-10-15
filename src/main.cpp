@@ -131,8 +131,24 @@ static MovementIndicator currentMoveIndicator();
 static void sendCirclePreview();
 static void redrawDetailScreen();
 
-static void goToError(const String &msg, AppState after)
+static void enterIpEntryDefaults(); // defined below
+static void loadCharacterList();    // defined below
+
+// Non-fatal errors are only surfaced while Debug Mode is on. With it off,
+// the error screen (and its serial echo) is skipped and the app silently
+// carries on to whichever state the error screen would have led to once
+// dismissed. Pass fatal=true for errors that must always be shown.
+static void goToError(const String &msg, AppState after, bool fatal = false)
 {
+  if (!fatal && !InputManager::debugEnabled())
+  {
+    if (after == AppState::IP_ENTRY)
+      enterIpEntryDefaults();
+    else
+      loadCharacterList();
+    return;
+  }
+
   g_errorMessage = msg;
   g_stateAfterError = after;
   g_state = AppState::ERROR_SCREEN;
@@ -330,7 +346,7 @@ static const SettingDescriptor SETTINGS_TABLE[] = {
     {"Swap X/O", settingApplySwapButtons, settingValueSwapButtons},
     {"HP gauge style", settingApplyGaugeStyle, settingValueGaugeStyle},
     // Debug / test
-    {"Serial Debug Output", settingApplySerialDebug, settingValueSerialDebug},
+    {"Debug Mode", settingApplySerialDebug, settingValueSerialDebug},
     {"Local Relay Test Mode", settingApplyRelayTestMode, settingValueRelayTestMode},
     // Network
     {"Saved WiFi", settingApplyNoop, settingValueSavedWifi, openWifiList},
@@ -1711,7 +1727,7 @@ void setup()
 
   if (!wifiOk)
   {
-    goToError("WiFi setup timed out. Rebooting...", AppState::IP_ENTRY);
+    goToError("WiFi setup timed out. Rebooting...", AppState::IP_ENTRY, true); // fatal: always shown
     delay(3000);
     ESP.restart();
   }
