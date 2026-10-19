@@ -33,6 +33,12 @@ namespace InputManager
   static volatile uint8_t s_lastAB = 0;
   static unsigned long s_lastStepMs = 0; // timestamp of last nonzero step, for acceleration
 
+  // millis() deadline until which joystick directions are ignored because
+  // the encoder was just turned (see DIR_ENCODER_LOCKOUT_MS in config.h).
+  // Written from the ISR on every quadrature edge; compared with signed
+  // subtraction so millis() rollover is harmless.
+  static volatile unsigned long s_encoderGuardUntilMs = 0;
+
   static const int8_t QUAD_TABLE[16] = {
       0, +1, -1, 0,
       -1, 0, 0, +1,
@@ -74,6 +80,7 @@ namespace InputManager
     uint8_t index = (s_lastAB << 2) | curAB;
     s_rawCounter += QUAD_TABLE[index & 0x0F];
     s_lastAB = curAB;
+    s_encoderGuardUntilMs = millis() + DIR_ENCODER_LOCKOUT_MS;
   }
 
   int32_t readEncoderDelta(EncoderProfile profile)
@@ -204,6 +211,68 @@ namespace InputManager
   static unsigned long s_lastExpanderRetryMs = 0;
   static const unsigned long EXPANDER_RETRY_INTERVAL_MS = 250;
 
+  // ---------------------------------------------------------------------
+  // Joystick accidental-nudge guards
+  // ---------------------------------------------------------------------
+  // The tilt switch wobbles when the encoder is turned or pushed, which
+  // would otherwise register as a direction press and start a move. Three
+  // guards (a fourth, the minimum hold time, lives in pollDirection()):
+  //   1. encoder activity lockout   - s_encoderGuardUntilMs, set by the ISR
+  //   2. center-push lockout        - s_centerGuardUntilMs, below
+  //   3. ambiguous multi-direction  - s_dirsAmbiguous, below
+  // Evaluated once per fresh expander snapshot (see expanderState()).
+  static unsigned long s_centerGuardUntilMs = 0;
+  static unsigned long s_centerPureStartMs = 0; // 0 = center push not currently closed on its own
+  static bool s_dirsAmbiguous = false;
+
+  static inline bool guardActive(unsigned long untilMs, unsigned long now)
+  {
+    return (long)(untilMs - now) > 0;
+  }
+
+  static void updateDirectionGuards(uint16_t exp, unsigned long now)
+  {
+    bool centerLow = !((exp >> EXP_PIN_ENCODER_BTN) & 0x01);
+    int dirsLow = (!((exp >> EXP_PIN_JOY_UP) & 0x01)) + (!((exp >> EXP_PIN_JOY_DOWN) & 0x01)) +
+                  (!((exp >> EXP_PIN_JOY_LEFT) & 0x01)) + (!((exp >> EXP_PIN_JOY_RIGHT) & 0x01));
+
+    // Two or more directions at once (diagonal or opposite) is never a
+    // deliberate single-cell nudge.
+    s_dirsAmbiguous = (dirsLow >= 2);
+
+    if (!centerLow)
+    {
+      s_centerPureStartMs = 0;
+      return;
+    }
+
+    if (dirsLow == 0)
+    {
+      // Center contact closed with no direction: a genuine push, but only
+      // trusted once it has persisted briefly - a real tilt can close the
+      // center contact a hair before its own direction contact does.
+      if (s_centerPureStartMs == 0)
+        s_centerPureStartMs = (now != 0) ? now : 1;
+      if (now - s_centerPureStartMs >= DIR_CENTER_PURE_MS)
+        s_centerGuardUntilMs = now + DIR_BUTTON_LOCKOUT_MS;
+    }
+    else if (guardActive(s_centerGuardUntilMs, now))
+    {
+      // Center still held while a direction wobbles in: keep the lockout
+      // extended for as long as the push lasts. (With no genuine push
+      // already established, center+direction is just the tilt switch's
+      // own quirk and must not lock anything out.)
+      s_centerGuardUntilMs = now + DIR_BUTTON_LOCKOUT_MS;
+    }
+  }
+
+  static bool directionsBlocked(unsigned long now)
+  {
+    return s_dirsAmbiguous ||
+           guardActive(s_centerGuardUntilMs, now) ||
+           guardActive(s_encoderGuardUntilMs, now);
+  }
+
   static uint16_t expanderState()
   {
     unsigned long now = millis();
@@ -231,6 +300,7 @@ namespace InputManager
       s_expanderCache = s_expanderReady ? pcf8575Read() : 0xFFFF;
       s_expanderCacheMs = now;
       s_expanderCacheValid = true;
+      updateDirectionGuards(s_expanderCache, now);
     }
     return s_expanderCache;
   }
@@ -400,6 +470,15 @@ namespace InputManager
     bool raw = (expanderState() >> btn.expBit) & 0x01;
     unsigned long now = millis();
 
+    // Accidental-nudge guards (encoder activity, center push, multiple
+    // directions - see updateDirectionGuards()): treat the direction as
+    // released before it reaches the debounce state, same approach as
+    // pollButton()'s forceReleased.
+    if (directionsBlocked(now))
+    {
+      raw = HIGH;
+    }
+
     if (raw != btn.lastRawState)
     {
       if (s_debugEnabled)
@@ -415,15 +494,29 @@ namespace InputManager
       btn.debouncedState = raw;
       if (btn.debouncedState == LOW)
       {
-        // Just pressed - report it right away. (Release isn't reported
-        // at all; a direction only ever fires on press, same as before.)
+        // Just pressed - not reported yet; it has to survive
+        // DIR_MIN_HOLD_MS first (below). longPressFired is reused here as
+        // "this press has already been reported".
         btn.pressStartMs = now;
-        if (s_debugEnabled)
-        {
-          Serial.printf("[input P%d] SHORT_PRESS (instant, direction)\n", btn.expBit);
-        }
-        return ButtonEvent::SHORT_PRESS;
+        btn.longPressFired = false;
       }
+      else
+      {
+        btn.longPressFired = false;
+      }
+    }
+
+    // Report the press once it has been held long enough to rule out a
+    // brush/wobble. One event per physical press; release isn't reported.
+    if (btn.debouncedState == LOW && !btn.longPressFired &&
+        (now - btn.pressStartMs) >= DIR_MIN_HOLD_MS)
+    {
+      btn.longPressFired = true;
+      if (s_debugEnabled)
+      {
+        Serial.printf("[input P%d] SHORT_PRESS (direction, held %lums)\n", btn.expBit, now - btn.pressStartMs);
+      }
+      return ButtonEvent::SHORT_PRESS;
     }
 
     return ButtonEvent::NONE;

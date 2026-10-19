@@ -426,6 +426,78 @@ static void rotateForTableOrientation(int dCol, int dRow, int &outCol, int &outR
   rotateQuarterTurnsCW(dCol, dRow, g_settings.tableOrientation, outCol, outRow);
 }
 
+// ---------------------------------------------------------------------
+// Joystick menu navigation
+// ---------------------------------------------------------------------
+// Same inverse-rotation remap as rotateForScreenRotation() above, but for
+// an explicitly given rotation - menus need this because the settings
+// screen live-previews g_settingsDraft's rotation, which is what's
+// actually on screen there, rather than the saved g_settings value.
+static void rotateForRotation(int col, int row, uint8_t rotation, int &outCol, int &outRow)
+{
+  uint8_t inverseTurns = (4 - (rotation & 0x03)) & 0x03;
+  rotateQuarterTurnsCW(col, row, inverseTurns, outCol, outRow);
+}
+
+enum class NavDir : uint8_t
+{
+  NONE,
+  UP,
+  DOWN,
+  LEFT,
+  RIGHT
+};
+
+// Polls all four joystick directions exactly once (each debounce/repeat
+// state machine needs a call every tick, whether or not it's used) and
+// returns at most one direction for the menu handlers to act on, as seen
+// on screen under `rotation` - so "up" always means visually up on the
+// (possibly rotated) display. Holding up/down auto-repeats; left/right
+// never do, so holding them can't flip a setting back and forth.
+static NavDir pollNavDirection(uint8_t rotation)
+{
+  ButtonEvent up = InputManager::pollJoyUp();
+  ButtonEvent down = InputManager::pollJoyDown();
+  ButtonEvent left = InputManager::pollJoyLeft();
+  ButtonEvent right = InputManager::pollJoyRight();
+  bool upR = InputManager::pollJoyUpRepeat();
+  bool downR = InputManager::pollJoyDownRepeat();
+  bool leftR = InputManager::pollJoyLeftRepeat();
+  bool rightR = InputManager::pollJoyRightRepeat();
+
+  int col = 0, row = 0;
+  bool repeat = false;
+  if (up != ButtonEvent::NONE || upR)
+  {
+    row = -1;
+    repeat = (up == ButtonEvent::NONE);
+  }
+  else if (down != ButtonEvent::NONE || downR)
+  {
+    row = 1;
+    repeat = (down == ButtonEvent::NONE);
+  }
+  else if (left != ButtonEvent::NONE || leftR)
+  {
+    col = -1;
+    repeat = (left == ButtonEvent::NONE);
+  }
+  else if (right != ButtonEvent::NONE || rightR)
+  {
+    col = 1;
+    repeat = (right == ButtonEvent::NONE);
+  }
+  if (col == 0 && row == 0)
+    return NavDir::NONE;
+
+  int vCol, vRow;
+  rotateForRotation(col, row, rotation, vCol, vRow);
+  NavDir dir = (vRow < 0) ? NavDir::UP : (vRow > 0) ? NavDir::DOWN : (vCol < 0) ? NavDir::LEFT : NavDir::RIGHT;
+  if (repeat && (dir == NavDir::LEFT || dir == NavDir::RIGHT))
+    return NavDir::NONE;
+  return dir;
+}
+
 static void renderSettingsScreen()
 {
   std::vector<String> names, values;
@@ -611,19 +683,40 @@ static int currentDisplayTempHp() { return computePendingHp().tempHp; }
 // State handlers
 // ===========================================================================
 
+static void adjustIpField(int32_t delta)
+{
+  uint16_t &field = g_ipFields[g_ipFieldIndex];
+  int maxVal = (g_ipFieldIndex < 4) ? 255 : 65535;
+  int newVal = (int)field + delta;
+  if (newVal < 0)
+    newVal = maxVal;
+  if (newVal > maxVal)
+    newVal = 0;
+  field = (uint16_t)newVal;
+  Display::showIpEntry(g_ipFields, g_ipFieldIndex, g_settings.relayTestMode);
+}
+
 static void handleIpEntry()
 {
   int32_t delta = InputManager::readEncoderDelta(InputManager::EncoderProfile::IP_ENTRY);
   if (delta != 0)
   {
-    uint16_t &field = g_ipFields[g_ipFieldIndex];
-    int maxVal = (g_ipFieldIndex < 4) ? 255 : 65535;
-    int newVal = (int)field + delta;
-    if (newVal < 0)
-      newVal = maxVal;
-    if (newVal > maxVal)
-      newVal = 0;
-    field = (uint16_t)newVal;
+    adjustIpField(delta);
+  }
+
+  // Joystick: left/right pick the field, up/down change its value by one.
+  NavDir nav = pollNavDirection(g_settings.screenRotation);
+  if (nav == NavDir::UP)
+  {
+    adjustIpField(1);
+  }
+  else if (nav == NavDir::DOWN)
+  {
+    adjustIpField(-1);
+  }
+  else if (nav == NavDir::LEFT || nav == NavDir::RIGHT)
+  {
+    g_ipFieldIndex = (g_ipFieldIndex + (nav == NavDir::RIGHT ? 1 : 4)) % 5;
     Display::showIpEntry(g_ipFields, g_ipFieldIndex, g_settings.relayTestMode);
   }
 
@@ -768,6 +861,22 @@ static void handleWifiList()
     renderWifiList();
   }
 
+  // Joystick: up/down scroll, left goes back to settings. (Deleting is
+  // deliberately left to button B's two-press confirm, not a direction.)
+  NavDir nav = pollNavDirection(g_settingsDraft.screenRotation);
+  if ((nav == NavDir::UP || nav == NavDir::DOWN) && n > 0)
+  {
+    g_wifiIndex = (g_wifiIndex + (nav == NavDir::DOWN ? 1 : n - 1)) % n;
+    g_wifiDeleteArmed = false;
+    renderWifiList();
+  }
+  else if (nav == NavDir::LEFT)
+  {
+    g_state = AppState::SETTINGS;
+    renderSettingsScreen();
+    return;
+  }
+
   ButtonEvent a = InputManager::pollButtonA();
   ButtonEvent b = InputManager::pollButtonB();
 
@@ -880,6 +989,32 @@ static void handleSettings()
     renderSettingsScreen();
   }
 
+  // Joystick: up/down move between rows, left/right change the selected
+  // value (same as turning the encoder); right on an action row (WiFi,
+  // firmware update) activates it, like a short press of B. Uses the
+  // draft's rotation since that's what's live-previewed on screen here.
+  NavDir nav = pollNavDirection(g_settingsDraft.screenRotation);
+  if (SETTINGS_COUNT > 0 && nav != NavDir::NONE)
+  {
+    if (nav == NavDir::UP || nav == NavDir::DOWN)
+    {
+      g_settingsIndex = (g_settingsIndex + (nav == NavDir::DOWN ? 1 : SETTINGS_COUNT - 1)) % SETTINGS_COUNT;
+      renderSettingsScreen();
+    }
+    else if (nav == NavDir::RIGHT && SETTINGS_TABLE[g_settingsIndex].onActivate)
+    {
+      SETTINGS_TABLE[g_settingsIndex].onActivate();
+      if (g_state == AppState::SETTINGS) // startOta() etc. switch screens; don't paint over them
+        renderSettingsScreen();
+      return;
+    }
+    else
+    {
+      SETTINGS_TABLE[g_settingsIndex].applyDelta(g_settingsDraft, nav == NavDir::RIGHT ? 1 : -1);
+      renderSettingsScreen();
+    }
+  }
+
   ButtonEvent a = InputManager::pollButtonA();
   if (a == ButtonEvent::SHORT_PRESS)
   {
@@ -916,6 +1051,23 @@ static void handleCharacterList()
     int n = g_characters.size();
     g_selectedIndex = ((g_selectedIndex + delta) % n + n) % n;
     Display::showCharacterList(g_characters, g_selectedIndex);
+  }
+
+  // Joystick: up/down move the selection, right opens the selected character.
+  NavDir nav = pollNavDirection(g_settings.screenRotation);
+  if (!g_characters.empty())
+  {
+    int n = g_characters.size();
+    if (nav == NavDir::UP || nav == NavDir::DOWN)
+    {
+      g_selectedIndex = ((g_selectedIndex + (nav == NavDir::DOWN ? 1 : -1)) % n + n) % n;
+      Display::showCharacterList(g_characters, g_selectedIndex);
+    }
+    else if (nav == NavDir::RIGHT)
+    {
+      enterDetailForSelected();
+      return;
+    }
   }
 
   ButtonEvent a = InputManager::pollButtonA();

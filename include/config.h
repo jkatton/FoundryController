@@ -146,6 +146,28 @@
 #define MOVE_REPEAT_DELAY_MS    500
 #define MOVE_REPEAT_INTERVAL_MS 250
 
+// Accidental-nudge guards for the joystick directions. The RKJXT1F42001 is
+// a tilt switch, so turning or pressing the encoder can wobble the stick
+// enough to briefly close a direction contact. See InputManager.cpp's
+// direction guards for how these are applied; tune them on the hardware.
+//
+// DIR_ENCODER_LOCKOUT_MS: directions are ignored for this long after the
+//   last encoder quadrature edge.
+// DIR_BUTTON_LOCKOUT_MS: directions are ignored while the center push is
+//   held, and for this long after it is released.
+// DIR_CENTER_PURE_MS: the center push only counts as a genuine push (for
+//   the lockout above) once it has been closed with no direction closed
+//   for this long - a real tilt also closes the center contact (hardware
+//   quirk) and must not lock itself out.
+// DIR_MIN_HOLD_MS: a direction must stay pressed (after BUTTON_DEBOUNCE_MS)
+//   for this long before it counts as a nudge. Adds latency to every
+//   deliberate nudge, so keep it as small as still rejects brushes.
+// Also rejected: two or more directions closed at once (diagonals/opposites).
+#define DIR_ENCODER_LOCKOUT_MS  200
+#define DIR_BUTTON_LOCKOUT_MS   200
+#define DIR_CENTER_PURE_MS       15
+#define DIR_MIN_HOLD_MS          60
+
 
 // pre-fill the Port the relay server listens on (default is 8787).
 #define RELAY_DEFAULT_PORT 8787
