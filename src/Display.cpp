@@ -336,14 +336,15 @@ static int ringHoleHalfWidth(int absDy)
     centeredText(tft, "Press any button to go back", 160, 1, COL_DIM);
   }
 
-  void showOtaStatus(const String &line1, const String &line2)
+  void showOtaStatus(const String &line1, const String &line2,
+                     const String &title, const String &footer)
   {
     s_listValid = false;
     tft.fillScreen(COL_BG);
-    centeredText(tft, "Firmware Update", 70, 1, COL_ACCENT);
+    centeredText(tft, title, 70, 1, COL_ACCENT);
     centeredText(tft, line1, 105, 1, COL_TEXT);
     centeredText(tft, line2, 125, 1, COL_TEXT);
-    centeredText(tft, "Hold any button to cancel", 190, 1, COL_DIM);
+    centeredText(tft, footer, 190, 1, COL_DIM);
   }
 
   void showOtaProgress(int percent)
@@ -410,6 +411,36 @@ static int ringHoleHalfWidth(int absDy)
       tft.setTextColor(COL_HP_BAD, COL_BG);
       tft.drawString("LOCAL TEST MODE ON", SCREEN_CX, 80);
     }
+  }
+
+  void showOtaSendTarget(const uint16_t octets[4], int fieldIndex)
+  {
+    s_listValid = false;
+    s_lastListSelectedIndex = -1;
+    s_lastDetailUuid = "";
+    tft.fillScreen(COL_BG);
+    centeredText(tft, "Send firmware to", 45, 1, COL_ACCENT);
+
+    tft.setTextSize(2);
+    tft.setTextDatum(MC_DATUM);
+    int slotX[4] = {45, 95, 145, 195};
+    for (int i = 0; i < 4; i++)
+    {
+      tft.setTextColor((i == fieldIndex) ? COL_ACCENT : COL_TEXT, COL_BG);
+      tft.drawString(String(octets[i]), slotX[i], 110);
+      if (i < 3)
+      {
+        tft.setTextColor(COL_DIM, COL_BG);
+        tft.drawString(".", slotX[i] + 22, 110);
+      }
+    }
+
+    tft.setTextSize(1);
+    tft.setTextColor(COL_DIM, COL_BG);
+    tft.drawString("Target must be on its", SCREEN_CX, 145);
+    tft.drawString("Firmware Update screen", SCREEN_CX, 158);
+    tft.drawString(shortLabel(labelA()) + ":next " + longLabel(labelA()) + ":send", SCREEN_CX, 200);
+    tft.drawString(longLabel(labelB()) + ":back", SCREEN_CX, 215);
   }
 
   void showSettings(const std::vector<String> &names, const std::vector<String> &values, int selectedIndex)

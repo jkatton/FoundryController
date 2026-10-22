@@ -28,6 +28,9 @@ enum class AppState {
                              // reached from the "Saved WiFi" row of the settings carousel
   OTA_UPDATE,               // waiting for / receiving an OTA firmware upload, reached
                              // from the "Firmware Update" row of the settings carousel
+  OTA_SEND,                 // picking a target IP and pushing this unit's own firmware to another
+                             // unit that's sitting on its OTA_UPDATE screen, reached from the
+                             // "Send Firmware" row of the settings carousel
   ERROR_SCREEN
 };
 

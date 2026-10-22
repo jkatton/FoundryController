@@ -302,6 +302,7 @@ static String settingValueSwapButtons(const AppSettings &s)
 }
 
 static void startOta(); // defined below, alongside handleSettings()
+static void startSendFirmware();
 static void startAddWifi();
 static void openWifiList();
 
@@ -337,6 +338,11 @@ static String settingValueOta(const AppSettings &s)
   return String("Press ") + (InputManager::buttonsSwapped() ? BUTTON_A_LABEL : BUTTON_B_LABEL);
 }
 
+static String settingValueSendFw(const AppSettings &s)
+{
+  return pressBLabel();
+}
+
 static const SettingDescriptor SETTINGS_TABLE[] = {
 // Player-facing
     {"Screen rotation", settingApplyRotation, settingValueRotation},
@@ -353,6 +359,7 @@ static const SettingDescriptor SETTINGS_TABLE[] = {
     {"Add WiFi Network", settingApplyNoop, settingValueAddWifi, startAddWifi},
     // Update
     {"Firmware Update", settingApplyOta, settingValueOta, startOta},
+    {"Send Firmware", settingApplyNoop, settingValueSendFw, startSendFirmware},
 };
 static const int SETTINGS_COUNT = sizeof(SETTINGS_TABLE) / sizeof(SETTINGS_TABLE[0]);
 
@@ -977,6 +984,256 @@ static void handleOta()
       InputManager::pollButtonB() == ButtonEvent::LONG_PRESS)
   {
     ESP.restart(); // simplest clean way out; any unsaved settings draft is discarded
+  }
+}
+
+// ---------------------------------------------------------------------
+// Send Firmware: push this unit's own running firmware to another unit
+// ---------------------------------------------------------------------
+// The other unit must be sitting on its "Firmware Update" screen (startOta()
+// above), which is what runs the /update HTTP endpoint. This unit reads its
+// own sketch back out of flash and POSTs it there as a multipart upload,
+// byte-for-byte what a browser would send - so nothing changes on the
+// receiving side. Only the app image is copied: the target keeps its own
+// LittleFS (saved WiFi, relay address, settings).
+static uint16_t g_sendIp[4] = {192, 168, 1, 100};
+static int g_sendField = 3;
+static bool g_sendShowingResult = false;
+static unsigned long g_sendResultMs = 0;
+
+// Streams the sketch in 512-byte chunks (never the whole image in RAM) to
+// target:80/update. On failure `err` holds a short message (<= ~28 chars so
+// it fits the status screen).
+static bool sendFirmwareTo(const IPAddress &target, String &err)
+{
+  const uint32_t total = ESP.getSketchSize();
+  if (total == 0)
+  {
+    err = "Can't read own firmware";
+    return false;
+  }
+
+  Display::showOtaStatus("To " + target.toString(), "Connecting...", "Send Firmware", "Please wait");
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+
+  WiFiClient client;
+  client.setTimeout(OTA_SEND_TIMEOUT_MS);
+  if (!client.connect(target, 80))
+  {
+    err = "No answer on port 80";
+    return false;
+  }
+
+  const String boundary = "----CharOMatic" + String(ESP.getChipId(), HEX);
+  const String head = "--" + boundary +
+                      "\r\nContent-Disposition: form-data; name=\"firmware\"; filename=\"firmware.bin\""
+                      "\r\nContent-Type: application/octet-stream\r\n\r\n";
+  const String tail = "\r\n--" + boundary + "--\r\n";
+  const uint32_t contentLen = head.length() + total + tail.length();
+
+  client.print("POST /update HTTP/1.1\r\nHost: " + target.toString() +
+               "\r\nContent-Type: multipart/form-data; boundary=" + boundary +
+               "\r\nContent-Length: " + String(contentLen) +
+               "\r\nConnection: close\r\n\r\n");
+  client.print(head);
+
+  Display::showOtaStatus("To " + target.toString(), "Sending...", "Send Firmware", "Do not power off");
+  Display::showOtaProgress(0);
+
+  uint32_t buf[128]; // 512 bytes; uint32_t because ESP.flashRead() needs 4-byte alignment
+  uint32_t sent = 0;
+  int lastPct = -1;
+  while (sent < total)
+  {
+    uint32_t n = total - sent;
+    if (n > sizeof(buf))
+      n = sizeof(buf);
+    // `sent` is always a multiple of 512, so the address stays aligned; the
+    // final read is rounded up to a whole word and only n bytes are sent.
+    if (!ESP.flashRead(sent, buf, (n + 3) & ~3u))
+    {
+      err = "Flash read failed";
+      client.stop();
+      return false;
+    }
+
+    const uint8_t *p = (const uint8_t *)buf;
+    uint32_t off = 0;
+    unsigned long lastProgressMs = millis();
+    while (off < n)
+    {
+      if (!client.connected())
+      {
+        err = "Target disconnected";
+        client.stop();
+        return false;
+      }
+      size_t w = client.write(p + off, n - off);
+      if (w == 0)
+      {
+        if (millis() - lastProgressMs > OTA_SEND_TIMEOUT_MS)
+        {
+          err = "Send timed out";
+          client.stop();
+          return false;
+        }
+        delay(1);
+        continue;
+      }
+      off += w;
+      lastProgressMs = millis();
+    }
+    sent += n;
+
+    int pct = (int)((sent * 100ULL) / total);
+    if (pct != lastPct) // only repaint when the number changes
+    {
+      lastPct = pct;
+      Display::showOtaProgress(pct);
+    }
+    yield();
+  }
+  client.print(tail);
+
+  // The receiver verifies the image, then replies and reboots.
+  String resp;
+  unsigned long t0 = millis();
+  while (millis() - t0 < OTA_SEND_REPLY_MS && resp.length() < 400)
+  {
+    while (client.available() && resp.length() < 400)
+      resp += (char)client.read();
+    if (!client.connected() && !client.available())
+      break;
+    delay(10);
+  }
+  client.stop();
+
+  if (resp.indexOf("Success") >= 0)
+    return true;
+
+  if (resp.length() == 0)
+  {
+    err = "No confirmation";
+    return false;
+  }
+  int bodyAt = resp.indexOf("\r\n\r\n");
+  String body = (bodyAt >= 0) ? resp.substring(bodyAt + 4) : resp;
+  body.trim();
+  err = (body.length() > 0) ? body.substring(0, 28) : String("Rejected by target");
+  return false;
+}
+
+static void renderSendTarget()
+{
+  Display::showOtaSendTarget(g_sendIp, g_sendField);
+}
+
+static void startSendFirmware()
+{
+  if (WiFi.status() != WL_CONNECTED)
+    return;
+
+  // Same subnet as this unit is by far the likeliest target, so start from
+  // our own address and put the cursor on the last octet. Keep the last
+  // target's final octet if it was on this same subnet.
+  IPAddress me = WiFi.localIP();
+  bool sameSubnet = (g_sendIp[0] == me[0] && g_sendIp[1] == me[1] && g_sendIp[2] == me[2]);
+  g_sendIp[0] = me[0];
+  g_sendIp[1] = me[1];
+  g_sendIp[2] = me[2];
+  if (!sameSubnet)
+    g_sendIp[3] = me[3];
+  g_sendField = 3;
+  g_sendShowingResult = false;
+
+  g_state = AppState::OTA_SEND;
+  renderSendTarget();
+}
+
+static void adjustSendField(int32_t delta)
+{
+  int newVal = (int)g_sendIp[g_sendField] + delta;
+  if (newVal < 0)
+    newVal = 255;
+  if (newVal > 255)
+    newVal = 0;
+  g_sendIp[g_sendField] = (uint16_t)newVal;
+  renderSendTarget();
+}
+
+static void handleSendFirmware()
+{
+  // Result screen: wait for any input (ignoring the first moment, so the
+  // hold that started the send can't instantly dismiss it), then go back
+  // to the target picker.
+  if (g_sendShowingResult)
+  {
+    InputManager::readEncoderDelta(); // discard
+    NavDir nav = pollNavDirection(g_settingsDraft.screenRotation);
+    ButtonEvent a = InputManager::pollButtonA();
+    ButtonEvent b = InputManager::pollButtonB();
+    if (millis() - g_sendResultMs > 800 &&
+        (nav != NavDir::NONE || a != ButtonEvent::NONE || b != ButtonEvent::NONE))
+    {
+      g_sendShowingResult = false;
+      renderSendTarget();
+    }
+    return;
+  }
+
+  int32_t delta = InputManager::readEncoderDelta(InputManager::EncoderProfile::IP_ENTRY);
+  if (delta != 0)
+    adjustSendField(delta);
+
+  // Joystick: left/right pick the octet, up/down change its value by one.
+  NavDir nav = pollNavDirection(g_settingsDraft.screenRotation);
+  if (nav == NavDir::UP)
+    adjustSendField(1);
+  else if (nav == NavDir::DOWN)
+    adjustSendField(-1);
+  else if (nav == NavDir::LEFT || nav == NavDir::RIGHT)
+  {
+    g_sendField = (g_sendField + (nav == NavDir::RIGHT ? 1 : 3)) % 4;
+    renderSendTarget();
+  }
+
+  ButtonEvent a = InputManager::pollButtonA();
+  if (a == ButtonEvent::SHORT_PRESS)
+  {
+    g_sendField = (g_sendField + 1) % 4;
+    renderSendTarget();
+  }
+  else if (a == ButtonEvent::LONG_PRESS)
+  {
+    IPAddress target(g_sendIp[0], g_sendIp[1], g_sendIp[2], g_sendIp[3]);
+    String err;
+    bool ok;
+    if (target == WiFi.localIP())
+    {
+      err = "That's this unit";
+      ok = false;
+    }
+    else
+    {
+      ok = sendFirmwareTo(target, err);
+    }
+
+    if (ok)
+      Display::showOtaStatus("Sent!", "Target is rebooting", "Send Firmware", "Press any button");
+    else
+      Display::showOtaStatus("Send failed", err, "Send Firmware", "Press any button");
+    g_sendShowingResult = true;
+    g_sendResultMs = millis();
+    return;
+  }
+
+  // Back to the settings carousel (draft/selection untouched).
+  ButtonEvent b = InputManager::pollButtonB();
+  if (b == ButtonEvent::LONG_PRESS)
+  {
+    g_state = AppState::SETTINGS;
+    renderSettingsScreen();
+    return;
   }
 }
 
@@ -1871,7 +2128,6 @@ void setup()
   g_circleRadius = g_settings.circleRadius; // last radius used in circle mode, if any (see g_circleRadius' own comment)
 
   InputManager::begin();
-
   Display::showBoot("Starting WiFi...");
   delay(1000);
   // Tries every saved network first; opens the config portal only if none connect.
@@ -1902,6 +2158,7 @@ void setup()
 
   // No saved address, or it didn't work: fall back to manual entry.
   enterIpEntryDefaults();
+
 }
 
 void loop()
@@ -1925,6 +2182,9 @@ void loop()
     break;
   case AppState::OTA_UPDATE:
     handleOta();
+    break;
+  case AppState::OTA_SEND:
+    handleSendFirmware();
     break;
   case AppState::ERROR_SCREEN:
     handleErrorScreen();

@@ -191,6 +191,15 @@
 
 
 
+// "Send Firmware" (unit-to-unit update, see main.cpp's sendFirmwareTo()).
+// OTA_SEND_TIMEOUT_MS: how long a connect/socket write may stall before the
+//   transfer is abandoned (the receiver stalls briefly while erasing flash
+//   sectors, so don't set this too low).
+// OTA_SEND_REPLY_MS: how long to wait for the receiver's "Update Success"
+//   reply after the last byte is sent (it verifies the image first).
+#define OTA_SEND_TIMEOUT_MS  8000
+#define OTA_SEND_REPLY_MS    20000
+
 // LittleFS path used to remember the relay address across reboots
 #define RELAY_CONFIG_PATH "/relay.cfg"
 

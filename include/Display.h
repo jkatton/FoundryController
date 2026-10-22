@@ -38,10 +38,18 @@ namespace Display {
 
   void showLoadingCharacters();
 
+  // "Send Firmware" target picker: 4 IP octets, one editable at a time
+  // (fieldIndex 0-3, highlighted). Same look as showIpEntry() minus the port.
+  void showOtaSendTarget(const uint16_t octets[4], int fieldIndex);
+
   // OTA firmware-update screens. showOtaStatus() is a full repaint;
   // showOtaProgress() only redraws the progress bar/percentage so it
   // doesn't flicker while an upload is streaming in.
-  void showOtaStatus(const String &line1, const String &line2);
+  // title/footer default to the receiving-side wording; the firmware
+  // sender passes its own.
+  void showOtaStatus(const String &line1, const String &line2,
+                     const String &title = "Firmware Update",
+                     const String &footer = "Hold any button to cancel");
   void showOtaProgress(int percent);
 
   // Settings carousel: one row per user-editable setting, names[i]/values[i]
