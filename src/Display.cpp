@@ -342,6 +342,7 @@ static int ringHoleHalfWidth(int absDy)
     s_listValid = false;
     tft.fillScreen(COL_BG);
     centeredText(tft, title, 70, 1, COL_ACCENT);
+    centeredText(tft, String("v") + FIRMWARE_VERSION, 84, 1, COL_DIM);
     centeredText(tft, line1, 105, 1, COL_TEXT);
     centeredText(tft, line2, 125, 1, COL_TEXT);
     centeredText(tft, footer, 190, 1, COL_DIM);
@@ -420,6 +421,7 @@ static int ringHoleHalfWidth(int absDy)
     s_lastDetailUuid = "";
     tft.fillScreen(COL_BG);
     centeredText(tft, "Send firmware to", 45, 1, COL_ACCENT);
+    centeredText(tft, String("this unit: v") + FIRMWARE_VERSION, 68, 1, COL_DIM);
 
     tft.setTextSize(2);
     tft.setTextDatum(MC_DATUM);

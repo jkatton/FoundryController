@@ -191,6 +191,11 @@
 
 
 
+// Firmware version, shown on the Firmware Update (receive) screen and the
+// Send Firmware screens so you can tell units apart and confirm an update
+// took. Bump this by hand whenever you make a build you intend to distribute.
+#define FIRMWARE_VERSION "1.0.0"
+
 // "Send Firmware" (unit-to-unit update, see main.cpp's sendFirmwareTo()).
 // OTA_SEND_TIMEOUT_MS: how long a connect/socket write may stall before the
 //   transfer is abandoned (the receiver stalls briefly while erasing flash

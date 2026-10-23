@@ -138,12 +138,22 @@ static void loadCharacterList();    // defined below
 // the error screen (and its serial echo) is skipped and the app silently
 // carries on to whichever state the error screen would have led to once
 // dismissed. Pass fatal=true for errors that must always be shown.
+//
+// `after` = CHARACTER_DETAIL is for failures that happen while working on a
+// character (HP update, move, circle): the app stays on that character's
+// screen - with any pending edit intact so it can be retried - instead of
+// bouncing back to the character list.
 static void goToError(const String &msg, AppState after, bool fatal = false)
 {
   if (!fatal && !InputManager::debugEnabled())
   {
     if (after == AppState::IP_ENTRY)
       enterIpEntryDefaults();
+    else if (after == AppState::CHARACTER_DETAIL)
+    {
+      g_state = AppState::CHARACTER_DETAIL;
+      redrawDetailScreen();
+    }
     else
       loadCharacterList();
     return;
@@ -1433,7 +1443,7 @@ static void sendCurrentHp()
   }
   else
   {
-    goToError("update failed: " + RelayClient::lastError(), AppState::CHARACTER_LIST);
+    goToError("update failed: " + RelayClient::lastError(), AppState::CHARACTER_DETAIL);
     return;
   }
   Display::showCharacterDetail(g_activeChar, g_addTarget, pendingHp, pendingTempHp, g_deltaValue, false, g_justSent,
@@ -1507,7 +1517,7 @@ static void sendMovePreview()
     // on the server to clean up.
     exitMoveMode(false);
     g_lastModified = DetailSubDisplay::HP;
-    goToError("move failed: " + RelayClient::lastError(), AppState::CHARACTER_LIST);
+    goToError("move failed: " + RelayClient::lastError(), AppState::CHARACTER_DETAIL);
     return;
   }
 
@@ -1605,7 +1615,7 @@ static void confirmMoveAndReturn()
     // already gone/invalid either way, so there's nothing left to cancel.
     exitMoveMode(false);
     g_lastModified = DetailSubDisplay::HP; // nothing left to show for the move
-    goToError("move confirm failed: " + RelayClient::lastError(), AppState::CHARACTER_LIST);
+    goToError("move confirm failed: " + RelayClient::lastError(), AppState::CHARACTER_DETAIL);
     return;
   }
 
@@ -1683,7 +1693,7 @@ static void sendCirclePreview()
     // the server for this attempt to clean up.
     g_circleEditing = false;
     g_circleDrawn = false;
-    goToError("circle preview failed: " + RelayClient::lastError(), AppState::CHARACTER_LIST);
+    goToError("circle preview failed: " + RelayClient::lastError(), AppState::CHARACTER_DETAIL);
     return;
   }
 
@@ -2060,44 +2070,32 @@ static void handleCharacterDetail()
   }
 }
 
+// Leaves the error screen for wherever goToError() said to go next.
+static void leaveErrorScreen()
+{
+  if (g_stateAfterError == AppState::IP_ENTRY)
+  {
+    enterIpEntryDefaults();
+  }
+  else if (g_stateAfterError == AppState::CHARACTER_DETAIL)
+  {
+    InputManager::readEncoderDelta(); // drop any turns made while the error was showing so they don't land on the HP edit
+    g_state = AppState::CHARACTER_DETAIL;
+    redrawDetailScreen();
+  }
+  else
+  {
+    loadCharacterList();
+  }
+}
+
 static void handleErrorScreen()
 {
   ButtonEvent a = InputManager::pollButtonA();
   ButtonEvent b = InputManager::pollButtonB();
-  if (b == ButtonEvent::SHORT_PRESS)
+  if (b == ButtonEvent::SHORT_PRESS || a == ButtonEvent::DOUBLE_PRESS || a == ButtonEvent::SHORT_PRESS)
   {
-    if (g_stateAfterError == AppState::IP_ENTRY)
-    {
-      enterIpEntryDefaults();
-    }
-    else
-    {
-      loadCharacterList();
-    }
-  }
-
-  else if (a == ButtonEvent::DOUBLE_PRESS)
-  {
-    if (g_stateAfterError == AppState::IP_ENTRY)
-    {
-      enterIpEntryDefaults();
-    }
-    else
-    {
-      loadCharacterList();
-    }
-  }
-
-  else if (a == ButtonEvent::SHORT_PRESS)
-  {
-    if (g_stateAfterError == AppState::IP_ENTRY)
-    {
-      enterIpEntryDefaults();
-    }
-    else
-    {
-      loadCharacterList();
-    }
+    leaveErrorScreen();
   }
 }
 
@@ -2128,6 +2126,7 @@ void setup()
   g_circleRadius = g_settings.circleRadius; // last radius used in circle mode, if any (see g_circleRadius' own comment)
 
   InputManager::begin();
+
   Display::showBoot("Starting WiFi...");
   delay(1000);
   // Tries every saved network first; opens the config portal only if none connect.
@@ -2158,7 +2157,6 @@ void setup()
 
   // No saved address, or it didn't work: fall back to manual entry.
   enterIpEntryDefaults();
-
 }
 
 void loop()
