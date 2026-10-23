@@ -23,6 +23,10 @@ namespace InputManager
   void setButtonsSwapped(bool swapped) { s_buttonsSwapped = swapped; }
   bool buttonsSwapped() { return s_buttonsSwapped; }
 
+  // See setDirectionMinHoldMs() in InputManager.h.
+  static uint16_t s_dirMinHoldMs = DIR_MIN_HOLD_MS;
+  void setDirectionMinHoldMs(uint16_t ms) { s_dirMinHoldMs = ms; }
+
   // ---------------------------------------------------------------------
   // Rotary encoder - interrupt driven quadrature decode
   // ---------------------------------------------------------------------
@@ -273,6 +277,16 @@ namespace InputManager
            guardActive(s_encoderGuardUntilMs, now);
   }
 
+  // Which guard is currently blocking directions - for the debug log only.
+  static const char *blockReason(unsigned long now)
+  {
+    if (s_dirsAmbiguous)
+      return "several directions at once";
+    if (guardActive(s_centerGuardUntilMs, now))
+      return "center push";
+    return "encoder turn";
+  }
+
   static uint16_t expanderState()
   {
     unsigned long now = millis();
@@ -323,6 +337,8 @@ namespace InputManager
                                            // waiting to see if a second click follows
     unsigned long firstClickReleaseMs = 0; // when that pending release happened
     unsigned long lastRepeatMs = 0;        // 0 = not currently auto-repeating; see pollButtonRepeat()
+    bool tainted = false;                  // directions only: contact closed while a guard was active - must
+                                           // open again before it can count (DIR_REQUIRE_RELEASE_AFTER_GUARD)
   };
 
   static ButtonState s_btnA;
@@ -474,9 +490,36 @@ namespace InputManager
     // directions - see updateDirectionGuards()): treat the direction as
     // released before it reaches the debounce state, same approach as
     // pollButton()'s forceReleased.
+    const bool rawPhys = raw;
     if (directionsBlocked(now))
     {
+      if (rawPhys == LOW)
+      {
+        if (!btn.tainted && s_debugEnabled)
+        {
+          Serial.printf("[input P%d] direction ignored (%s)\n", btn.expBit, blockReason(now));
+        }
+        btn.tainted = true;
+      }
       raw = HIGH;
+    }
+    else if (btn.tainted)
+    {
+      // Guard just ended. If the contact is still closed it's the same
+      // wobble that started inside the guard - keep ignoring it until it
+      // opens (or, with the feature off, let it through as before).
+      if (rawPhys == HIGH)
+      {
+        btn.tainted = false;
+      }
+      else
+      {
+#if DIR_REQUIRE_RELEASE_AFTER_GUARD
+        raw = HIGH;
+#else
+        btn.tainted = false;
+#endif
+      }
     }
 
     if (raw != btn.lastRawState)
@@ -509,7 +552,7 @@ namespace InputManager
     // Report the press once it has been held long enough to rule out a
     // brush/wobble. One event per physical press; release isn't reported.
     if (btn.debouncedState == LOW && !btn.longPressFired &&
-        (now - btn.pressStartMs) >= DIR_MIN_HOLD_MS)
+        (now - btn.pressStartMs) >= s_dirMinHoldMs)
     {
       btn.longPressFired = true;
       if (s_debugEnabled)

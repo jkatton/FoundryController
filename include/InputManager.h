@@ -40,6 +40,12 @@ namespace InputManager {
   void setButtonsSwapped(bool swapped);
   bool buttonsSwapped();
 
+  // Overrides how long (after debounce) a joystick direction must stay
+  // pressed before pollJoy*() reports it - defaults to DIR_MIN_HOLD_MS.
+  // main.cpp raises it to DIR_START_HOLD_MS while no move is in progress on
+  // the detail screen, so a brush against the stick can't open move mode.
+  void setDirectionMinHoldMs(uint16_t ms);
+
   // Returns accumulated encoder steps (positive = clockwise) since the last
   // call, then resets the internal counter to zero. Safe to call every loop.
   enum class EncoderProfile : uint8_t { NORMAL, IP_ENTRY };

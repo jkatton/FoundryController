@@ -168,6 +168,25 @@
 #define DIR_CENTER_PURE_MS       15
 #define DIR_MIN_HOLD_MS          60
 
+// Extra protection against *starting* a move by accident. Opening move mode
+// is the costly case (it sends a network preview and takes over the screen),
+// while nudges once move mode is already open can stay quick. So while on the
+// character detail screen with no move in progress, a direction must be held
+// for DIR_START_HOLD_MS instead of DIR_MIN_HOLD_MS before it counts. Once
+// move mode is open the shorter DIR_MIN_HOLD_MS applies again. Set equal to
+// DIR_MIN_HOLD_MS to disable.
+#define DIR_START_HOLD_MS       150
+
+// A direction contact that was already closed while one of the guards above
+// was active (encoder just turned, center push, several directions at once)
+// is treated as a wobble and must open again before it can count. Without
+// this, a wobble that outlasts the lockout window would register the moment
+// the lockout expired. Side effect: a deliberate tilt that starts inside a
+// lockout window (e.g. within DIR_ENCODER_LOCKOUT_MS of turning the encoder)
+// is ignored until you release and tilt again. Set to 0 to go back to the
+// old behavior.
+#define DIR_REQUIRE_RELEASE_AFTER_GUARD 1
+
 
 // pre-fill the Port the relay server listens on (default is 8787).
 #define RELAY_DEFAULT_PORT 8787

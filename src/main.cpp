@@ -2161,6 +2161,13 @@ void setup()
 
 void loop()
 {
+  // Opening move mode by accident is the expensive case, so require a
+  // longer hold for the press that would start one (character detail screen
+  // with no move in progress). Everywhere else - including nudges once move
+  // mode is open - the normal short hold applies.
+  InputManager::setDirectionMinHoldMs(
+      (g_state == AppState::CHARACTER_DETAIL && !g_moveMode) ? DIR_START_HOLD_MS : DIR_MIN_HOLD_MS);
+
   switch (g_state)
   {
   case AppState::IP_ENTRY:
