@@ -2110,9 +2110,9 @@ static void handleCharacterDetail()
       redrawDetailScreen(); // updates the big readout and the small one beside the name as it changes
     }
 
-    // Button A: short press sends, long press abandons. A double press
-    // falls through to the shared handler below, which also leaves
-    // elevation mode.
+    // Button A: short press sends, long press abandons. A double press is
+    // ignored while elevation mode is open (see the double-press handler
+    // below - it only acts on the HP screen).
     if (a == ButtonEvent::SHORT_PRESS)
     {
       sendElevation();
@@ -2205,8 +2205,8 @@ static void handleCharacterDetail()
   // heads back to the character list if neither does. (After a cancel, the
   // shared sub-display moves straight to the other one if it has something
   // pending, so each long press cancels exactly one thing.) A double press
-  // always jumps to (and stays on) HP adjustment, even if move or circle
-  // radius-editing was what's currently showing.
+  // toggles regular/temp HP, but only while the HP screen is what's showing
+  // (it's ignored during move, radius-editing and elevation-editing).
   if (a == ButtonEvent::SHORT_PRESS)
   {
     if (g_lastModified == DetailSubDisplay::MOVE && g_moveMode)
@@ -2290,17 +2290,18 @@ static void handleCharacterDetail()
   }
   else if (a == ButtonEvent::DOUBLE_PRESS)
   {
+    // Switching between regular and temp HP only makes sense - and is only
+    // allowed - while the HP screen itself is showing. If radius-editing,
+    // elevation-editing or a pending move's screen is up instead, the
+    // double press is simply ignored (it doesn't switch modes or screens).
+    const bool onHpScreen = !g_circleEditing && !g_elevEditing &&
+                            !(g_moveMode && g_lastModified == DetailSubDisplay::MOVE);
+    if (!onHpScreen)
+      return;
+
     // Toggle which pool a positive turn adds to. Subtracting is unaffected -
     // it always drains temp HP first, then HP, regardless of this setting.
     g_addTarget = (g_addTarget == HpAddTarget::NORMAL) ? HpAddTarget::TEMP : HpAddTarget::NORMAL;
-    // Double-tapping A is also the explicit "give me HP adjustment" action -
-    // hands the encoder back from radius-editing (if that was open) and
-    // switches the shared sub-display to HP even if move was showing,
-    // without cancelling either of them.
-    g_circleEditing = false;
-    g_elevEditing = false; // same for elevation-editing - and any change dialed in but not sent is dropped
-    g_elevDelta = 0;
-    g_lastModified = DetailSubDisplay::HP;
     redrawDetailScreen();
     return;
   }

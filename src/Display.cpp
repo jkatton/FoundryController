@@ -61,6 +61,9 @@ namespace Display
   // themselves (config.h) and the current swap state stay in one place.
   static char labelA() { return InputManager::buttonsSwapped() ? BUTTON_B_LABEL : BUTTON_A_LABEL; }
   static char labelB() { return InputManager::buttonsSwapped() ? BUTTON_A_LABEL : BUTTON_B_LABEL; }
+  // These build the label *markers* embedded in hint strings; the drawing
+  // code (hintLayout()/drawHint()/drawTextRow(), further down) replaces each
+  // marker with a button pictogram when it draws the string.
   static String shortLabel(char c) { return ">" + String(c) + "<"; }
   static String longLabel(char c) { return "[" + String(c) + "]"; }
   static String doubleLabel(char c) { return ">" + String(c) + String(c) + "<"; }
@@ -263,6 +266,243 @@ static int ringHoleHalfWidth(int absDy)
     s_gaugeStyleFlat = flat;
   }
 
+  // -----------------------------------------------------------------------
+  // Button pictograms. Instead of printing button labels as text (">A<",
+  // "[B]", ">AA<"), a hint string containing the label markers built by
+  // shortLabel()/longLabel()/doubleLabel() above is drawn with a small
+  // pictogram in place of each marker:
+  //   - a filled disc with a dark X cut out of it for the button labelled
+  //     BUTTON_A_LABEL and a filled disc with a dark O for BUTTON_B_LABEL
+  //     (the same two symbols those labels' patched font glyphs used to show)
+  //   - short press:  the icon on its own
+  //   - long press:   the icon with a thick, short parenthesis-like curve
+  //                   either side
+  //   - double press: two icons side by side
+  // hintLayout() is the single routine that measures and draws such strings
+  // (text runs and pictograms mixed on one line); anything that isn't a
+  // marker is drawn as ordinary text, so strings without markers lay out
+  // exactly as plain text does.
+  // -----------------------------------------------------------------------
+  enum HintPress : uint8_t
+  {
+    HINT_SHORT = 0,
+    HINT_LONG = 1,
+    HINT_DOUBLE = 2
+  };
+
+  #define HINT_ICON_R 5   // radius of one pictogram circle (11px across - a touch taller than size-1 text)
+  #define HINT_ICON_PAD 2 // blank pixels either side of a pictogram when it sits in a line of text
+
+  static bool isButtonLabelChar(char c)
+  {
+    return c == BUTTON_A_LABEL || c == BUTTON_B_LABEL;
+  }
+
+  static int buttonIconWidth(HintPress press)
+  {
+    switch (press)
+    {
+    case HINT_LONG:
+      return 17; // icon plus the curves, whose outer edge sits 8px either side of its center
+    case HINT_DOUBLE:
+      return 23; // two 11px icons, 2px apart
+    default:
+      return 2 * HINT_ICON_R + 1;
+    }
+  }
+
+  // One pictogram: a solid disc in `color` with a bold background-colored X
+  // (button A) or O (button B) cut out of it.
+  static void drawButtonIconOne(int cx, int cy, char label, uint16_t color)
+  {
+    tft.fillCircle(cx, cy, HINT_ICON_R, color);
+    if (label == BUTTON_A_LABEL)
+    {
+      // Bold X: each diagonal is three pixels wide horizontally (about two
+      // across the stroke), the whole X 7px square - kept inside the 11px
+      // disc by trimming the stroke ends that would stick out past +-3.
+      for (int i = -3; i <= 3; i++)
+      {
+        for (int d = -1; d <= 1; d++)
+        {
+          int dx = i + d;
+          if (dx < -3 || dx > 3)
+            continue;
+          tft.drawPixel(cx + dx, cy + i, COL_BG);
+          tft.drawPixel(cx + dx, cy - i, COL_BG);
+        }
+      }
+    }
+    else
+    {
+      // Bold O: a dark 7px disc with a small disc of the icon color put
+      // back in the middle, leaving a two-pixel dark ring.
+      tft.fillCircle(cx, cy, 3, COL_BG);
+      tft.fillCircle(cx, cy, 1, color);
+    }
+  }
+
+  // The pictogram for a press type, centered on (cx, cy).
+  static void drawButtonIcon(int cx, int cy, char label, HintPress press, uint16_t color)
+  {
+    if (press == HINT_DOUBLE)
+    {
+      drawButtonIconOne(cx - 6, cy, label, color);
+      drawButtonIconOne(cx + 6, cy, label, color);
+      return;
+    }
+
+    drawButtonIconOne(cx, cy, label, color);
+
+    if (press == HINT_LONG)
+    {
+      // Parenthesis-like curves, two pixels thick (arcs of radius-8 and
+      // radius-7 circles around the icon, so they hug it with a single blank
+      // pixel between) and short: only 30 degrees either side of straight
+      // left / straight right, so they stand no taller than the icon itself.
+      const int steps = 4;
+      for (int side = -1; side <= 1; side += 2)
+      {
+        for (int r = 7; r <= 8; r++)
+        {
+          int prevX = 0, prevY = 0;
+          for (int k = 0; k <= steps; k++)
+          {
+            float th = (-30.0f + 60.0f * (float)k / (float)steps) * 0.0174533f;
+            int x = cx + side * (int)roundf((float)r * cosf(th));
+            int y = cy + (int)roundf((float)r * sinf(th));
+            if (k > 0)
+              tft.drawLine(prevX, prevY, x, y, color);
+            prevX = x;
+            prevY = y;
+          }
+        }
+      }
+    }
+  }
+
+  // If s[i...] starts with a label marker (">A<", "[A]" or ">AA<" for either
+  // button label), fills in its button, press type and length and returns true.
+  static bool matchHintToken(const String &s, int i, char &label, HintPress &press, int &len)
+  {
+    const int n = s.length();
+    char c0 = s[i];
+    if (c0 == '>' && i + 2 < n)
+    {
+      char a = s[i + 1];
+      if (isButtonLabelChar(a))
+      {
+        if (s[i + 2] == '<')
+        {
+          label = a;
+          press = HINT_SHORT;
+          len = 3;
+          return true;
+        }
+        if (i + 3 < n && s[i + 2] == a && s[i + 3] == '<')
+        {
+          label = a;
+          press = HINT_DOUBLE;
+          len = 4;
+          return true;
+        }
+      }
+    }
+    else if (c0 == '[' && i + 2 < n)
+    {
+      char a = s[i + 1];
+      if (isButtonLabelChar(a) && s[i + 2] == ']')
+      {
+        label = a;
+        press = HINT_LONG;
+        len = 3;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static bool hasHintToken(const String &s)
+  {
+    char label;
+    HintPress press;
+    int len;
+    for (int i = 0; i < (int)s.length(); i++)
+    {
+      if (matchHintToken(s, i, label, press, len))
+        return true;
+    }
+    return false;
+  }
+
+  // Draws a run of ordinary text with its left edge at x, vertically
+  // centered on y, and returns its width. draw=false only measures. Uses
+  // whatever text size is currently set.
+  static int hintTextRun(const String &t, int x, int y, uint16_t color, bool draw)
+  {
+    int w = tft.textWidth(t);
+    if (draw)
+    {
+      tft.setTextDatum(ML_DATUM);
+      tft.setTextColor(color, COL_BG);
+      tft.drawString(t, x, y);
+    }
+    return w;
+  }
+
+  // Lays out s (text with label markers) starting at x, returning its total
+  // width; draw=false only measures. Pictograms are vertically centered on y
+  // like the text.
+  static int hintLayout(const String &s, int x, int y, uint16_t color, bool draw)
+  {
+    int cur = x;
+    String text;
+    const int n = s.length();
+    int i = 0;
+    while (i < n)
+    {
+      char label;
+      HintPress press;
+      int len;
+      if (matchHintToken(s, i, label, press, len))
+      {
+        if (text.length() > 0)
+        {
+          cur += hintTextRun(text, cur, y, color, draw);
+          text = "";
+        }
+        int w = buttonIconWidth(press);
+        cur += HINT_ICON_PAD;
+        if (draw)
+          drawButtonIcon(cur + w / 2, y, label, press, color);
+        cur += w + HINT_ICON_PAD;
+        i += len;
+      }
+      else
+      {
+        text += s[i];
+        i++;
+      }
+    }
+    if (text.length() > 0)
+      cur += hintTextRun(text, cur, y, color, draw);
+    return cur - x;
+  }
+
+  static int hintWidth(const String &s)
+  {
+    return hintLayout(s, 0, 0, 0, false);
+  }
+
+  // Draws a hint string centered on cx at row y, in `color` on COL_BG.
+  // Leaves the text datum at MC_DATUM, which the rest of this file assumes.
+  static void drawHint(const String &s, int cx, int y, uint16_t color)
+  {
+    int w = hintWidth(s);
+    hintLayout(s, cx - w / 2, y, color, true);
+    tft.setTextDatum(MC_DATUM);
+  }
+
   static void centeredText(TFT_eSPI &d, const String &s, int y, uint8_t size, uint16_t color)
   {
     d.setTextColor(color, COL_BG);
@@ -411,8 +651,8 @@ static int ringHoleHalfWidth(int absDy)
 
     tft.setTextSize(1);
     tft.setTextColor(COL_DIM, COL_BG);
-    tft.drawString(shortLabel(labelA()) + ":next " + longLabel(labelA()) + ":go", SCREEN_CX, 200);
-    tft.drawString(longLabel(labelB()) + ":settings", SCREEN_CX, 215);
+    drawHint(shortLabel(labelA()) + ":next " + longLabel(labelA()) + ":go", SCREEN_CX, 200, COL_DIM);
+    drawHint(longLabel(labelB()) + ":settings", SCREEN_CX, 215, COL_DIM);
 
     if (fakery)
     {
@@ -449,8 +689,8 @@ static int ringHoleHalfWidth(int absDy)
     tft.setTextColor(COL_DIM, COL_BG);
     tft.drawString("Target must be on its", SCREEN_CX, 145);
     tft.drawString("Firmware Update screen", SCREEN_CX, 158);
-    tft.drawString(shortLabel(labelA()) + ":next " + longLabel(labelA()) + ":send", SCREEN_CX, 200);
-    tft.drawString(longLabel(labelB()) + ":back", SCREEN_CX, 215);
+    drawHint(shortLabel(labelA()) + ":next " + longLabel(labelA()) + ":send", SCREEN_CX, 200, COL_DIM);
+    drawHint(longLabel(labelB()) + ":back", SCREEN_CX, 215, COL_DIM);
   }
 
   void showSettings(const std::vector<String> &names, const std::vector<String> &values, int selectedIndex)
@@ -507,8 +747,8 @@ static int ringHoleHalfWidth(int absDy)
     tft.setTextSize(1);
     tft.setTextColor(COL_DIM, COL_BG);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString(shortLabel(labelA()) + ":next", SCREEN_CX, 200);
-    tft.drawString(longLabel(labelA()) + ":save " + longLabel(labelB()) + ":back", SCREEN_CX, 215);
+    drawHint(shortLabel(labelA()) + ":next", SCREEN_CX, 200, COL_DIM);
+    drawHint(longLabel(labelA()) + ":save " + longLabel(labelB()) + ":back", SCREEN_CX, 215, COL_DIM);
   }
 
   void showWifiList(const std::vector<String> &ssids, const std::vector<String> &notes,
@@ -573,8 +813,8 @@ static int ringHoleHalfWidth(int absDy)
     tft.setTextColor(COL_DIM, COL_BG);
     tft.setTextDatum(MC_DATUM);
     if (n > 0)
-      tft.drawString(shortLabel(labelA()) + ":next " + shortLabel(labelB()) + ":delete", SCREEN_CX, 200);
-    tft.drawString(longLabel(labelA()) + "/" + longLabel(labelB()) + ":back", SCREEN_CX, 215);
+      drawHint(shortLabel(labelA()) + ":next " + shortLabel(labelB()) + ":delete", SCREEN_CX, 200, COL_DIM);
+    drawHint(longLabel(labelA()) + "/" + longLabel(labelB()) + ":back", SCREEN_CX, 215, COL_DIM);
   }
 
   void showCharacterList(const std::vector<Character> &chars, int selectedIndex)
@@ -658,8 +898,8 @@ static int ringHoleHalfWidth(int absDy)
     tft.setTextSize(1);
     tft.setTextColor(COL_DIM, COL_BG);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString(shortLabel(labelA()) + ": select", SCREEN_CX, 200);
-    tft.drawString(longLabel(labelB()) + ": IP input", SCREEN_CX, 215);
+    drawHint(shortLabel(labelA()) + ": select", SCREEN_CX, 200, COL_DIM);
+    drawHint(longLabel(labelB()) + ": IP input", SCREEN_CX, 215, COL_DIM);
 
     s_listValid = true;
     s_lastListChars = chars;
@@ -1058,7 +1298,11 @@ static int ringHoleHalfWidth(int absDy)
     int cx = SCREEN_CX + xOffset;
 
     tft.setTextSize(size);
-    int newWidth = (s.length() > 0) ? tft.textWidth(s) : 0;
+    // Strings carrying button-label markers (the hint rows) are measured and
+    // drawn with pictograms in place of the markers; everything else is
+    // plain text, exactly as before.
+    const bool rich = hasHintToken(s);
+    int newWidth = (s.length() > 0) ? (rich ? hintWidth(s) : tft.textWidth(s)) : 0;
     int clearWidth = max(newWidth, s_lastWidth[row]);
     if (maxClearHalfWidth >= 0)
     {
@@ -1078,6 +1322,11 @@ static int ringHoleHalfWidth(int absDy)
 
     if (s.length() == 0)
       return;
+    if (rich)
+    {
+      drawHint(s, cx, y, color);
+      return;
+    }
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(color, COL_BG);
     tft.drawString(s, cx, y);
@@ -1273,12 +1522,18 @@ static int ringHoleHalfWidth(int absDy)
   // through drawTextRow(), since that helper centers text around SCREEN_CX
   // and can't place it in a side column. An empty `text` just clears the
   // column (nothing to show: no circle drawn / no token / feature off).
-  static void drawSideReadout(bool rightSide, const String &text, uint16_t color, bool ringIcon, bool forceRedraw)
+  static void drawSideReadout(bool rightSide, const String &text, uint16_t color, bool ringIcon, bool forceRedraw,
+                              bool showIcons, bool showHint, char hintLabel, HintPress hintPress)
   {
-    static String s_lastText[2];
+    static String s_lastKey[2];
     const int idx = rightSide ? 1 : 0;
 
-    if (!forceRedraw && text == s_lastText[idx])
+    // Redraw when the number, the above/below icons or the button pictogram change.
+    String key = text;
+    key += showIcons ? "|i" : "|n";
+    if (showHint)
+      key += String("|") + String((int)hintLabel) + String((int)hintPress);
+    if (!forceRedraw && key == s_lastKey[idx])
       return;
 
     const int cx = rightSide ? (SCREEN_CX + 78) : (SCREEN_CX - 78);
@@ -1293,7 +1548,23 @@ static int ringHoleHalfWidth(int absDy)
     const int clearHalfH = ICON_GAP + ICON_H + ICON_UP_SHIFT + ICON_PAD;
     tft.fillRect(cx - halfW, SCREEN_CY - clearHalfH, halfW * 2, clearHalfH * 2, COL_BG);
 
-    if (text.length() > 0)
+    // The button pictogram that opens this readout's function sits above the
+    // number (and the readout's own icon) when there is a number, or takes
+    // the number's place when there isn't. Its blanking strip is narrower
+    // than the column (10px either side) so its upper corners stay inside the
+    // ring's empty hole instead of wiping the ring - the hole is already
+    // narrower than the column that high up.
+    const int hintY = SCREEN_CY - 34;
+    tft.fillRect(cx - 10, hintY - 8, 20, 16, COL_BG);
+
+    // The readout's own icon - the up/down triangles for elevation, the
+    // flattened ring caps for the circle - is drawn whenever there's a number
+    // and also (showIcons) when there isn't one, e.g. an elevation of zero or
+    // no circle drawn yet, so the readout never just vanishes while its
+    // function is available.
+    const bool haveNumber = text.length() > 0;
+
+    if (haveNumber)
     {
       const uint8_t numSize = text.length() <= 2 ? 2 : 1;
       tft.setTextSize(numSize);
@@ -1305,7 +1576,10 @@ static int ringHoleHalfWidth(int absDy)
       // shows up against the perfectly symmetric icons above and below it.
       // Nudge the text right by that much so the digits line up with them.
       tft.drawString(text, cx + numSize / 2, numY);
+    }
 
+    if (haveNumber || showIcons)
+    {
       if (ringIcon)
       {
         // Flattened top and bottom caps of one ring (radius 17) centered on
@@ -1326,7 +1600,14 @@ static int ringHoleHalfWidth(int absDy)
         tft.fillTriangle(cx, SCREEN_CY + ICON_GAP + ICON_H, cx - tw, SCREEN_CY + ICON_GAP, cx + tw, SCREEN_CY + ICON_GAP, color);
       }
     }
-    s_lastText[idx] = text;
+
+    if (showHint)
+    {
+      // With a number, the button pictogram sits above the whole readout;
+      // without one it stands in for the number, between the icons.
+      drawButtonIcon(cx, haveNumber ? hintY : SCREEN_CY, hintLabel, hintPress, color);
+    }
+    s_lastKey[idx] = key;
   }
 
   // Smoothly extends or retracts the HP and temp HP rings from the character's
@@ -1662,8 +1943,25 @@ static int ringHoleHalfWidth(int absDy)
     // band clear just above (and force-redrawn along with it) because their
     // icons sit low enough to overlap that band's top edge.
     const bool showElevation = elev.known && (int)roundf(elev.pending) != 0;
-    drawSideReadout(false, showElevation ? formatElevation(elev.pending) : String(""), COL_ELEV, false, forceRowsRedraw);
-    drawSideReadout(true, circle.drawn ? formatDistanceFt(circle.radius) : String(""), COL_CIRCLE, true, forceRowsRedraw);
+    // Each readout also carries the pictogram of the Button B press that
+    // opens its function - a short press for elevation, a long press for the
+    // circle - above its number, or standing in for the number when there
+    // isn't one. Shown only while that function can actually be opened: its
+    // setting is on, (for elevation) the character has a token, and no other
+    // mode is open (the mode screens' own hint rows explain Button B there).
+    const bool otherModeOpen = circle.active || elev.active;
+    const bool elevHint = elev.enabled && elev.known && !otherModeOpen;
+    const bool circleHint = circle.enabled && !otherModeOpen;
+    // The up/down triangles and ring caps are shown even with no number (a
+    // zero elevation, no circle drawn) as long as the function is available:
+    // elevation needs a token and Height Mode on, the circle needs Circle
+    // Feature on.
+    const bool elevIcons = elev.known && elev.enabled;
+    const bool circleIcons = circle.enabled;
+    drawSideReadout(false, showElevation ? formatElevation(elev.pending) : String(""), COL_ELEV, false, forceRowsRedraw,
+                    elevIcons, elevHint, labelB(), HINT_SHORT);
+    drawSideReadout(true, circle.drawn ? formatDistanceFt(circle.radius) : String(""), COL_CIRCLE, true, forceRowsRedraw,
+                    circleIcons, circleHint, labelB(), HINT_LONG);
 
     const int ARROW_CX = SCREEN_CX - 34;
     const int ARROW_CY = SCREEN_CY + 36;
@@ -1783,7 +2081,12 @@ static int ringHoleHalfWidth(int absDy)
     }
     else
     {
-      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + ":send HP " + longLabel(labelA()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
+      // Only offer "send HP" while there's actually an HP (or temp HP) change
+      // queued to send; otherwise just the way back.
+      const bool hpChangeQueued = (pendingHp != c.hp) || (pendingTempHp != c.tempHp);
+      String hpHint = hpChangeQueued ? (shortLabel(labelA()) + ":send HP " + longLabel(labelA()) + ":back")
+                                     : (longLabel(labelA()) + ":back");
+      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, hpHint, 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
       if (addTarget == HpAddTarget::TEMP)
       {
         drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, doubleLabel(labelA()) + ":reg hp", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);

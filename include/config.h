@@ -3,7 +3,7 @@
 // Firmware version, shown on the Firmware Update (receive) screen and the
 // Send Firmware screens so you can tell units apart and confirm an update
 // took. Bump this by hand whenever you make a build you intend to distribute.
-#define FIRMWARE_VERSION "1.1.2"
+#define FIRMWARE_VERSION "1.2.0"
 
 // =====================================================================
 // PIN CONFIGURATION - Wemos D1 Mini (ESP8266)
@@ -301,5 +301,10 @@
 // extra_scripts), these just show the font's original backtick/tilde
 // glyphs instead of icons - switch back to plain 'A'/'B' below at any
 // time if that script isn't in use.
+// Display.cpp draws these as pictograms rather than text wherever a hint
+// contains a button label: a circle with an X inside for BUTTON_A_LABEL, a
+// circle with an O inside for BUTTON_B_LABEL (long press adds a curve either
+// side, double press shows the icon twice). The characters themselves still
+// matter for the plain "Press X" style messages built in main.cpp.
 #define BUTTON_A_LABEL (char)0x60  // backtick - patched to an X
 #define BUTTON_B_LABEL (char)0x7E  // tilde - patched to a circle
