@@ -92,6 +92,7 @@ namespace Display
 #define COL_HP_WARN TFT_YELLOW
 #define COL_HP_BAD TFT_RED
 #define COL_TEMP 0x051F   // light blue for temp hp
+#define COL_TEMP_LINE 0x0290 // darker blue (about half brightness) for the thin pending-change line on the temp HP ring, so it reads as clearly different from the bright fill
 #define COL_CIRCLE 0xA29F // light purple for the circle-radius readout and circle mode - distinct from temp hp's blue and the cyan accent
 #define COL_ELEV 0xFBE0   // warm orange for the token elevation readout and elevation mode - distinct from the blue/cyan/purple above
 
@@ -288,20 +289,26 @@ static int ringHoleHalfWidth(int absDy)
     // transparent mask), so it just needs to land in the right spot -
     // no separate clear step beyond the fillScreen above.
     //
-    // Read a row at a time into a small stack buffer via memcpy_P rather
-    // than pushImage()'ing straight from the PROGMEM array: ESP8266 flash
-    // reads need to be word-aligned, and dereferencing a PROGMEM pointer
-    // directly (which pushImage would do internally) risks an unaligned
-    // read exception. memcpy_P handles that correctly, and one row
-    // (190 * 2 = 380 bytes here) is a trivial amount of stack.
+    // The bitmap is stored run-length compressed in flash (see
+    // char_o_matic_logo.h), so decode it a row at a time into a small stack
+    // buffer and push each row from there - one row (162 * 2 = 324 bytes
+    // here) is a trivial amount of stack, and the decoder only does byte
+    // reads from PROGMEM (pgm_read_byte), which are safe on the ESP8266
+    // without any alignment concerns.
     int x = (tft.width() - CHAR_O_MATIC_LOGO_W) / 2;
     int y = (tft.height() - CHAR_O_MATIC_LOGO_H) / 2 - 40;
     uint16_t rowBuf[CHAR_O_MATIC_LOGO_W];
+    CharOMaticLogoDecoder logo;
+    charOMaticLogoBegin(logo);
     for (int row = 0; row < CHAR_O_MATIC_LOGO_H; row++)
     {
-      memcpy_P(rowBuf, &CHAR_O_MATIC_LOGO_RGB565[row * CHAR_O_MATIC_LOGO_W], sizeof(rowBuf));
+      charOMaticLogoRead(logo, rowBuf, CHAR_O_MATIC_LOGO_W);
       tft.pushImage(x, y + row, CHAR_O_MATIC_LOGO_W, 1, rowBuf);
     }
+
+    // Firmware version, small and dim, centered just under the wordmark
+    // (the boot status line from showBoot() sits further down, at y=180).
+    centeredText(tft, String("v") + FIRMWARE_VERSION, y + CHAR_O_MATIC_LOGO_H + 12, 1, COL_DIM);
   }
 
   void showWifiPortalHint()
@@ -700,14 +707,25 @@ static int ringHoleHalfWidth(int absDy)
     d.drawArc(cx, cy, outerR, innerR, toTftAngle(startDeg), toTftAngle(endDeg), color, COL_BG, smooth);
   }
 
-  // Returns an interpolated red->yellow->green color for a gauge position,
-  // where frac 0.0 is the empty end (red) and 1.0 is the full end (green).
+  // Returns an interpolated red->orange->yellow->green color for a gauge
+  // position, where frac 0.0 is the empty end (red) and 1.0 is the full end
+  // (green); orange sits at 0.5 (see the remap at the top of the function).
   static uint16_t gaugeGradientColor(float frac)
   {
     if (frac < 0.0f)
       frac = 0.0f;
     if (frac > 1.0f)
       frac = 1.0f;
+
+    // Shift the gradient so the color that used to mean 25% HP remaining
+    // (orange) now means 50%: 0-50% sweeps red -> orange, 50-100% sweeps
+    // orange -> yellow -> green (the original curve's 0-25% and 25-100%
+    // stretches). Continuous at 50%. Applies everywhere this is used - the
+    // ring in both flat and gradient styles, and the HP number's color.
+    if (frac < 0.5f)
+      frac = frac * 0.5f;
+    else
+      frac = 0.25f + (frac - 0.5f) * 1.5f;
     uint8_t r, g;
     const uint8_t b = 0;
     if (frac < 0.5f)
@@ -745,6 +763,236 @@ static int ringHoleHalfWidth(int absDy)
       drawGaugeArc(d, cx, cy, outerR, innerR, a, next, gaugeGradientColor(mid / 360.0f));
       a = next;
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // HP / temp HP ring drawing with a "pending change" indicator.
+  //
+  // While HP (or temp HP) is being edited, the ring keeps showing the
+  // committed value at full width, and the change itself is drawn as a thin
+  // line along the arc between the committed and the pending value, with a
+  // full-width tick at the pending end (the tick, the full-width fill and the
+  // thin line are all drawn in the color of the pending health level):
+  //   - healing:  full-width fill up to the committed value, then the thin
+  //               line out to the pending value, tick at its far end
+  //   - damage:   full-width fill up to the pending value, tick there, then
+  //               the thin line back out to the committed value (the part
+  //               that's about to be lost)
+  // When nothing is pending there's no line or tick and it looks exactly as
+  // it always did.
+  //
+  // Flicker: every ring is described degree by degree - each whole degree is
+  // one of TRACK / FILL / LINE / TICK for a given state - and a redraw
+  // compares the state last drawn against the new one and repaints ONLY the
+  // degrees whose content actually changed (merged into runs). Pixels that
+  // look the same before and after are never touched, so dialing a change
+  // only ever paints the sliver that moved, instead of wiping and redrawing
+  // the whole span each encoder tick.
+  // -----------------------------------------------------------------------
+  enum RingKind : uint8_t
+  {
+    RING_TRACK = 0, // empty band: the track color (HP ring) / background (temp ring)
+    RING_FILL = 1,  // full-width fill
+    RING_LINE = 2,  // thin line on an otherwise empty band
+    RING_TICK = 3   // full-width white tick
+  };
+
+  struct RingState
+  {
+    int full = 0;    // degrees [0, full) are FILL (except the tick)
+    int lineTo = 0;  // degrees [full, lineTo) are LINE; == full when there's no pending change
+    int tick = -1;   // the tick covers [tick-2, tick) - i.e. it ends exactly at the pending value, inside where the ring will end up; -1 for none
+    uint16_t fillColor = 0; // flat style only (0 otherwise): the fill's solid color
+    uint16_t lineColor = 0; // flat style only (0 otherwise): the line's solid color
+    uint16_t tickColor = COL_TEXT; // the tick's color
+  };
+
+  // Where/how a ring is drawn.
+  struct RingStyle
+  {
+    int outerR;
+    int innerR;
+    int lineHalf;         // half-thickness of the thin line, about the band's middle
+    uint16_t trackColor;  // what an empty degree looks like
+    bool smoothTrack;     // antialias the track/clear painting
+    bool isTemp;          // the temp ring: solid COL_TEMP fill/line instead of the HP gradient/flat colors
+  };
+
+  static RingState s_hpRingState;
+  static RingState s_tempRingState;
+
+  static void resetRingState()
+  {
+    s_hpRingState = RingState();
+    s_tempRingState = RingState();
+  }
+
+  // The arc [fromDeg, toDeg) of one ring band in the HP ring's style:
+  // a single flat color, or the angle-keyed gradient.
+  static void paintRingSpan(int outerR, int innerR, float fromDeg, float toDeg, bool flat, uint16_t flatColor)
+  {
+    if (toDeg <= fromDeg)
+      return;
+    if (flat)
+      drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, outerR, innerR, fromDeg, toDeg, flatColor, false);
+    else
+      paintGaugeGradient(tft, SCREEN_CX, SCREEN_CY, outerR, innerR, fromDeg, toDeg);
+  }
+
+  // What degree d (0..359) of a ring shows in a given state.
+  static uint8_t ringKindAt(const RingState &st, int d)
+  {
+    // The tick is the last 2 degrees *up to* the pending value rather than
+    // straddling it, so it never sticks out past where the ring finally ends:
+    // when the animation finishes and the tick goes away, the end of the ring
+    // is exactly where the tick's end was, with nothing beyond it to erase.
+    if (st.tick >= 0 && d >= st.tick - 2 && d < st.tick)
+      return RING_TICK;
+    if (d < st.full)
+      return RING_FILL;
+    if (d < st.lineTo)
+      return RING_LINE;
+    return RING_TRACK;
+  }
+
+  // Paints one run [a, b) of degrees as `kind`. cleanFirst (LINE only) means
+  // the band under the thin line still holds fill/tick pixels from before, so
+  // it's emptied first; when it was already empty (or already a line) that
+  // step is skipped so a growing line never blinks.
+  static void paintRingRun(const RingStyle &rs, uint8_t kind, int a, int b, const RingState &st, bool flat, bool cleanFirst)
+  {
+    const int midR = (rs.outerR + rs.innerR) / 2;
+    switch (kind)
+    {
+    case RING_TRACK:
+      drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, rs.outerR, rs.innerR, a, b, rs.trackColor, rs.smoothTrack);
+      break;
+    case RING_FILL:
+      if (rs.isTemp)
+        drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, rs.outerR, rs.innerR, a, b, COL_TEMP);
+      else
+        paintRingSpan(rs.outerR, rs.innerR, a, b, flat, st.fillColor);
+      break;
+    case RING_LINE:
+      if (cleanFirst)
+        drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, rs.outerR, rs.innerR, a, b, rs.trackColor, rs.smoothTrack);
+      if (rs.isTemp)
+        drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, midR + rs.lineHalf, midR - rs.lineHalf, a, b, COL_TEMP_LINE);
+      else
+        paintRingSpan(midR + rs.lineHalf, midR - rs.lineHalf, a, b, flat, st.lineColor);
+      break;
+    case RING_TICK:
+      drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, rs.outerR, rs.innerR, a, b, st.tickColor, false);
+      break;
+    }
+  }
+
+  // Repaints exactly the degrees that differ between `cur` (what's on the
+  // display) and `next`, then records `next` as what's now there.
+  static void repaintRing(const RingStyle &rs, RingState &cur, const RingState &next, bool flat)
+  {
+    int runStart = -1;
+    uint8_t runKind = RING_TRACK;
+    bool runClean = false;
+
+    for (int d = 0; d <= 360; d++) // d == 360 is a sentinel that flushes the last run
+    {
+      bool changed = false;
+      uint8_t nk = RING_TRACK;
+      bool clean = false;
+      if (d < 360)
+      {
+        uint8_t ok = ringKindAt(cur, d);
+        nk = ringKindAt(next, d);
+        changed = (ok != nk) ||
+                  (nk == RING_FILL && cur.fillColor != next.fillColor) ||
+                  (nk == RING_LINE && cur.lineColor != next.lineColor) ||
+                  (nk == RING_TICK && cur.tickColor != next.tickColor);
+        clean = (nk == RING_LINE) && (ok == RING_FILL || ok == RING_TICK);
+      }
+
+      if (changed && runStart >= 0 && nk == runKind && clean == runClean)
+        continue; // extends the current run
+
+      if (runStart >= 0)
+      {
+        paintRingRun(rs, runKind, runStart, d, next, flat, runClean);
+        runStart = -1;
+      }
+      if (changed)
+      {
+        runStart = d;
+        runKind = nk;
+        runClean = clean;
+      }
+    }
+    cur = next;
+  }
+
+  // Brings the HP ring up to date. newFull/newLineTo/newTick are in degrees
+  // (see the block comment above); fillColor/lineColor are only used by the
+  // flat style (the gradient colors itself by angle). tickColor is used by
+  // both styles.
+  static void updateHpRing(float newFull, float newLineTo, float newTick, bool flat, uint16_t fillColor, uint16_t lineColor,
+                           uint16_t tickColor, int outerR, int innerR)
+  {
+    // Thin line: the middle 6px of the band. Track repaints are antialiased
+    // only in the gradient style (flat style is deliberately hard-edged -
+    // see the note at its call site in showCharacterDetail()).
+    const RingStyle rs = {outerR, innerR, 3, COL_TRACK, !flat, false};
+
+    RingState next;
+    next.full = (int)newFull;
+    next.lineTo = (int)newLineTo;
+    next.tick = (newTick >= 0) ? (int)newTick : -1;
+    next.fillColor = flat ? fillColor : 0;
+    next.lineColor = flat ? lineColor : 0;
+    next.tickColor = tickColor;
+    repaintRing(rs, s_hpRingState, next, flat);
+  }
+
+  // Same idea for the slim temp HP ring, which has no track (blank where
+  // empty) and is only 4px wide, so its thin line is the middle 2px.
+  static void updateTempRing(float newFull, float newLineTo, float newTick, int outerR, int innerR)
+  {
+    const RingStyle rs = {outerR, innerR, 1, COL_BG, true, true};
+
+    RingState next;
+    next.full = (int)newFull;
+    next.lineTo = (int)newLineTo;
+    next.tick = (newTick >= 0) ? (int)newTick : -1;
+    next.tickColor = COL_TEMP;
+    repaintRing(rs, s_tempRingState, next, true);
+  }
+
+  // Ring geometry shared by showCharacterDetail() and animateHpRings().
+  // (The HP ring's inner radius is RING_INNER_R - see its own comment.)
+  #define HP_RING_OUTER_R 114
+  #define TEMP_RING_OUTER_R 120
+  #define TEMP_RING_INNER_R 116
+
+  // Fraction (0..1) of the ring a given amount of HP / temp HP fills.
+  static float ringPct(int value, int maxHp)
+  {
+    if (maxHp <= 0 || value <= 0)
+      return 0.0f;
+    float p = (float)value / (float)maxHp;
+    return p > 1.0f ? 1.0f : p;
+  }
+
+  // Flat style's solid band color for a health fraction (one of
+  // GAUGE_FLAT_STEPS quantized steps along the red->yellow->green gradient).
+  static uint16_t hpBandColor(float pct)
+  {
+    const int GAUGE_FLAT_STEPS = 40; // ~9 degrees of gradient per band
+    return gaugeGradientColor(roundf(pct * GAUGE_FLAT_STEPS) / (float)GAUGE_FLAT_STEPS);
+  }
+
+  // The tick's color for a health fraction: the band color in flat style,
+  // the exact gradient color in gradient style.
+  static uint16_t hpTickColor(float pct, bool flat)
+  {
+    return flat ? hpBandColor(pct) : gaugeGradientColor(pct);
   }
 
   enum DetailTextRow : uint8_t
@@ -1081,18 +1329,120 @@ static int ringHoleHalfWidth(int absDy)
     s_lastText[idx] = text;
   }
 
+  // Smoothly extends or retracts the HP and temp HP rings from the character's
+  // committed values (c.hp / c.tempHp) to the newly sent ones, e.g. right
+  // after Button A sends an HP change. It continues from what the ring is
+  // already showing for that pending edit (the thin line + tick between old
+  // and new): healing grows the full-width fill along the line out to the
+  // tick; damage shrinks the line back in toward the tick (the fill already
+  // stops at the new value). The last frame is exactly the state a normal
+  // redraw with the new values would produce - no line, no tick - so the
+  // caller's following showCharacterDetail() has nothing left to paint.
+  //
+  // Blocks for the animation's duration (about 0.2-0.45s, longer for bigger
+  // changes), repainting only the degrees that changed each frame (see
+  // repaintRing()). Does nothing unless this character's detail screen is the
+  // one currently on the display.
+  void animateHpRings(const Character &c, int toHp, int toTempHp)
+  {
+    if (c.uuid != s_lastDetailUuid || c.maxHp <= 0)
+      return;
+
+    const bool flat = s_gaugeStyleFlat;
+
+    float fromPct = ringPct(c.hp, c.maxHp);
+    float toPct = ringPct(toHp, c.maxHp);
+    float fromTempPct = ringPct(c.tempHp, c.maxHp);
+    float toTempPct = ringPct(toTempHp, c.maxHp);
+
+    const float hpFromDeg = roundf(fromPct * 360.0f);
+    const float hpToDeg = roundf(toPct * 360.0f);
+    const float tempFromDeg = roundf(fromTempPct * 360.0f);
+    const float tempToDeg = roundf(toTempPct * 360.0f);
+
+    float travel = max(fabsf(hpToDeg - hpFromDeg), fabsf(tempToDeg - tempFromDeg));
+    if (travel <= 0.0f)
+      return;
+
+    // Longer sweeps take a little longer, within sensible bounds.
+    float durF = travel * 2.5f;
+    if (durF < 180.0f)
+      durF = 180.0f;
+    if (durF > 450.0f)
+      durF = 450.0f;
+    const unsigned long durationMs = (unsigned long)durF;
+
+    const uint16_t bandColor = hpBandColor(toPct);
+    const uint16_t tickColor = hpTickColor(toPct, flat);
+
+    const unsigned long startMs = millis();
+    while (true)
+    {
+      unsigned long elapsed = millis() - startMs;
+      float t = (elapsed >= durationMs) ? 1.0f : (float)elapsed / (float)durationMs;
+      float inv = 1.0f - t;
+      float eased = 1.0f - inv * inv * inv; // ease-out: quick start, gentle landing
+
+      float hpB = roundf(hpFromDeg + (hpToDeg - hpFromDeg) * eased);
+      float tempB = roundf(tempFromDeg + (tempToDeg - tempFromDeg) * eased);
+
+      float hpFull, hpLineTo, hpTick;
+      if (t >= 1.0f)
+      {
+        hpFull = hpToDeg;
+        hpLineTo = hpToDeg;
+        hpTick = -1.0f;
+      }
+      else if (hpToDeg >= hpFromDeg)
+      {
+        hpFull = hpB; // healing: the fill grows toward the tick
+        hpLineTo = hpToDeg;
+        hpTick = (hpToDeg != hpFromDeg) ? hpToDeg : -1.0f;
+      }
+      else
+      {
+        hpFull = hpToDeg; // damage: the line shrinks toward the tick
+        hpLineTo = hpB;
+        hpTick = hpToDeg;
+      }
+
+      float tFull, tLineTo, tTick;
+      if (t >= 1.0f)
+      {
+        tFull = tempToDeg;
+        tLineTo = tempToDeg;
+        tTick = -1.0f;
+      }
+      else if (tempToDeg >= tempFromDeg)
+      {
+        tFull = tempB;
+        tLineTo = tempToDeg;
+        tTick = (tempToDeg != tempFromDeg) ? tempToDeg : -1.0f;
+      }
+      else
+      {
+        tFull = tempToDeg;
+        tLineTo = tempB;
+        tTick = tempToDeg;
+      }
+
+      updateHpRing(hpFull, hpLineTo, hpTick, flat, bandColor, bandColor, tickColor, HP_RING_OUTER_R, RING_INNER_R);
+      updateTempRing(tFull, tLineTo, tTick, TEMP_RING_OUTER_R, TEMP_RING_INNER_R);
+
+      if (t >= 1.0f)
+        break;
+      delay(10); // also lets the WiFi stack run between frames
+    }
+  }
+
   void showCharacterDetail(const Character &c, HpAddTarget addTarget, int pendingHp, int pendingTempHp,
                            int pendingDelta, bool sending, bool justSent, const MovementIndicator &move, const CircleIndicator &circle,
                            const ElevationIndicator &elev)
   {
     s_listValid = false;
 
-    static float s_lastPct = -1.0f;
-    static uint16_t s_lastColor = 0;
-    static float s_lastTempPct = -1.0f;
-
     // HP ring (main gauge).
-    const int hpOuterR = 114;
+    const int hpOuterR = HP_RING_OUTER_R;
     const int hpInnerR = RING_INNER_R; // kept as one shared constant (see its own comment) since drawTextRow()'s
                                        // maxClearHalfWidth calls below need to match this exactly
 
@@ -1102,8 +1452,8 @@ static int ringHoleHalfWidth(int absDy)
     // so this stays deliberately thin, with a 1px gap so its inner edge never
     // touches the HP ring - each ring's anti-aliased edge needs genuine
     // background on both sides to blend against, not the other ring's color.
-    const int tempOuterR = 120;
-    const int tempInnerR = 116;
+    const int tempOuterR = TEMP_RING_OUTER_R;
+    const int tempInnerR = TEMP_RING_INNER_R;
 
     // Safe half-widths for the two status-tip rows near the bottom of the
     // screen (SCREEN_CY+65/+80) - both sit inside the HP ring's inner hole,
@@ -1119,8 +1469,7 @@ static int ringHoleHalfWidth(int absDy)
     {
       tft.fillScreen(COL_BG);
       tft.drawArc(SCREEN_CX, SCREEN_CY, hpOuterR, hpInnerR, 0, 360, COL_TRACK, COL_BG, true);
-      s_lastPct = 0.0f;
-      s_lastTempPct = 0.0f;
+      resetRingState();
       s_lastDetailUuid = c.uuid;
     }
 
@@ -1142,92 +1491,59 @@ static int ringHoleHalfWidth(int absDy)
 
     uint16_t hpColor = gaugeGradientColor(pct);
 
-    // Ring update: only repaint the part of the arc that actually changed.
-    // If the color band changed (e.g. green -> yellow) we have to repaint
-    // the whole filled portion, since the old color is baked into pixels we
-    // can't selectively recolor otherwise.
-    // Snap to whole degrees here, matching the rounding toTftAngle() applies
-    // when these values actually hit the display. Only the ring geometry
-    // (this boundary) needs to be pixel-consistent frame to frame; pct
-    // itself stays unrounded for color purposes below. Without this, oldDeg
-    // here and the boundary actually painted last frame can round to
-    // different integer degrees, leaving a real, fully-opaque leftover
-    // pixel of stale color between where this frame's erase starts and
-    // where last frame's fill actually stopped.
-    float newDeg = roundf(pct * 360.0f);
-    float oldDeg = roundf(s_lastPct * 360.0f);
-    ///
-    if (s_gaugeStyleFlat)
-    {
-      const int GAUGE_FLAT_STEPS = 40; // ~9 degrees of gradient per repaint step
-      uint16_t hpColorQuantized = gaugeGradientColor(round(pct * GAUGE_FLAT_STEPS) / (float)GAUGE_FLAT_STEPS);
+    // Ring update. The rings show the *committed* values (c.hp / c.tempHp) at
+    // full width, and any pending edit (pendingHp / pendingTempHp, which the
+    // text below shows as numbers) as a thin line plus tick - see the block
+    // comment above updateHpRing(). Degrees are snapped to whole numbers
+    // here, matching the rounding toTftAngle() applies when they actually hit
+    // the display, so the geometry stays pixel-consistent frame to frame
+    // (pct itself stays unrounded for color purposes).
+    int baseHp = c.hp;
+    if (baseHp < 0)
+      baseHp = 0;
+    if (baseHp > c.maxHp)
+      baseHp = c.maxHp;
+    float basePct = (c.maxHp > 0) ? (float)baseHp / (float)c.maxHp : 0.0f;
+    if (basePct > 1.0f)
+      basePct = 1.0f;
 
-      // Grow/shrink the boundary exactly as before - independent of whether
-      // the color changed this tick. smooth=false on all three flat-mode
-      // calls (this pair plus the recolor below) is deliberate: smoothArc's
-      // antialiasing always blends edge pixels toward the fixed COL_BG
-      // passed to TFT_eSPI, not toward whatever color the call is actually
-      // butting up against (hpColor here, COL_TRACK there) - fine when that
-      // neighbor really is COL_BG, wrong otherwise, and it only takes one
-      // side of a seam being wrong to leave a stray fleck. Keeping every
-      // flat-mode edge hard avoids the mismatch entirely instead of trying
-      // to get AA to agree with itself across separate calls; flat mode's
-      // whole aesthetic is solid bands anyway, so losing the soft edge here
-      // costs nothing. Gradient mode below is untouched since it isn't
-      // reported to have this problem and the smoothing matters more there.
-      if (newDeg > oldDeg)
-      {
-        drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, hpOuterR, hpInnerR, oldDeg, newDeg, hpColor, false);
-      }
-      else if (newDeg < oldDeg)
-      {
-        drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, hpOuterR, hpInnerR, newDeg, oldDeg, COL_TRACK, false);
-      }
+    float baseDeg = roundf(basePct * 360.0f);
+    float pendDeg = roundf(pct * 360.0f);
+    float hpFull = min(baseDeg, pendDeg);
+    float hpLineTo = max(baseDeg, pendDeg);
+    float hpTick = (pendDeg != baseDeg) ? pendDeg : -1.0f;
 
-      // If the color band shifted, only the already-filled region (0->newDeg)
-      // is now the wrong color - the track portion (newDeg->360) was never
-      // hpColor to begin with, so it doesn't need touching. Repainting just
-      // the fill region instead of the whole ring avoids a full-circumference
-      // wipe+redraw (and the flicker that came with it) on every color step.
-      if (hpColorQuantized != s_lastColor && newDeg > 0)
-      {
-        drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, hpOuterR, hpInnerR, 0, newDeg, hpColor, false);
-      }
-      s_lastColor = hpColorQuantized;
-    }
-    else
-    {
-      if (newDeg > oldDeg)
-      {
-        paintGaugeGradient(tft, SCREEN_CX, SCREEN_CY, hpOuterR, hpInnerR, oldDeg, newDeg);
-      }
-      else if (newDeg < oldDeg)
-      {
-        drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, hpOuterR, hpInnerR, newDeg, oldDeg, COL_TRACK);
-      }
-    }
-    s_lastPct = newDeg / 360.0f;
-    ///
+    // Colors: the full-width fill, the thin line and the tick are all the
+    // color of the *pending* health level (the same color the HP number
+    // gets), so the ring previews what it will look like once the change is
+    // sent. Flat style uses one solid band color for the fill and line (smooth=false
+    // throughout flat mode is deliberate - antialiasing always blends toward
+    // COL_BG rather than whatever a flat-mode edge actually butts up against,
+    // which leaves stray flecks at the seams); the gradient style colors the
+    // fill and line by angle instead, so only the tick needs the explicit
+    // color there.
+    uint16_t pendingBandColor = hpBandColor(pct);
+    uint16_t tickColor = hpTickColor(pct, s_gaugeStyleFlat);
+
+    updateHpRing(hpFull, hpLineTo, hpTick, s_gaugeStyleFlat, pendingBandColor, pendingBandColor, tickColor, hpOuterR, hpInnerR);
+
     // Temp HP ring: scaled the same way as the HP ring (fraction of maxHp,
-    // capped at a full loop when temp HP >= maxHp). Unlike the HP ring there's
-    // no background "track" color - it's just blank (COL_BG) when there's no
-    // temp HP, and grows/shrinks in blue as temp HP is gained/spent.
+    // capped at a full loop when temp HP >= maxHp), with the same
+    // committed-value-plus-pending-line treatment.
+    int baseTemp = c.tempHp;
+    if (baseTemp < 0)
+      baseTemp = 0;
+    float baseTempPct = (c.maxHp > 0) ? (float)baseTemp / (float)c.maxHp : 0.0f;
+    if (baseTempPct > 1.0f)
+      baseTempPct = 1.0f;
     float tempPct = (c.maxHp > 0) ? (float)displayTempHp / (float)c.maxHp : 0.0f;
     if (tempPct > 1.0f)
       tempPct = 1.0f;
 
-    float newTempDeg = roundf(tempPct * 360.0f);
-    float oldTempDeg = roundf(s_lastTempPct * 360.0f);
-
-    if (newTempDeg > oldTempDeg)
-    {
-      drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, tempOuterR, tempInnerR, oldTempDeg, newTempDeg, COL_TEMP);
-    }
-    else if (newTempDeg < oldTempDeg)
-    {
-      drawGaugeArc(tft, SCREEN_CX, SCREEN_CY, tempOuterR, tempInnerR, newTempDeg, oldTempDeg, COL_BG);
-    }
-    s_lastTempPct = newTempDeg / 360.0f;
+    float baseTempDeg = roundf(baseTempPct * 360.0f);
+    float pendTempDeg = roundf(tempPct * 360.0f);
+    updateTempRing(min(baseTempDeg, pendTempDeg), max(baseTempDeg, pendTempDeg),
+                   (pendTempDeg != baseTempDeg) ? pendTempDeg : -1.0f, tempOuterR, tempInnerR);
 
     // Text rows - each is its own self-contained strip. drawTextRow() only
     // actually repaints a row when its text/color changed since last call

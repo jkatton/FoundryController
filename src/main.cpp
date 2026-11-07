@@ -1448,6 +1448,19 @@ static void sendCurrentHp()
     return;
   }
 
+  // Optimistic: animate the rings to the new value and show it as committed
+  // right away, *before* the (blocking, network round-trip) relay call, so
+  // the bar starts moving the instant Button A is pressed. If the update
+  // fails, the previous values are put back below and the pending edit is
+  // still intact (g_deltaValue is untouched until it succeeds), so it can be
+  // retried.
+  const int prevHp = g_activeChar.hp;
+  const int prevTempHp = g_activeChar.tempHp;
+
+  Display::animateHpRings(g_activeChar, pendingHp, pendingTempHp);
+  g_activeChar.hp = pendingHp;
+  g_activeChar.tempHp = pendingTempHp;
+
   g_sending = true;
   Display::showCharacterDetail(g_activeChar, g_addTarget, pendingHp, pendingTempHp, g_deltaValue, true, false,
                                currentMoveIndicator(), currentCircleIndicator(), currentElevationIndicator());
@@ -1457,8 +1470,6 @@ static void sendCurrentHp()
   g_sending = false;
   if (ok)
   {
-    g_activeChar.hp = pendingHp;
-    g_activeChar.tempHp = pendingTempHp;
     g_deltaValue = 0;
     g_dirty = false;
     g_justSent = true;
@@ -1483,6 +1494,10 @@ static void sendCurrentHp()
   }
   else
   {
+    // Roll back the optimistic update; the pending delta is still set, so
+    // the redraw below shows the edit as pending again.
+    g_activeChar.hp = prevHp;
+    g_activeChar.tempHp = prevTempHp;
     goToError("update failed: " + RelayClient::lastError(), AppState::CHARACTER_DETAIL);
     return;
   }

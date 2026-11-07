@@ -70,6 +70,14 @@ namespace Display {
   // scrollOffset/selectedIndex let the caller manage a simple windowed list.
   void showCharacterList(const std::vector<Character> &chars, int selectedIndex);
 
+  // Animates the HP and temp HP rings smoothly from the character's committed
+  // values (c.hp / c.tempHp) to toHp / toTempHp - the extend/retract effect
+  // for a just-sent HP change. Call it BEFORE updating c to the new values,
+  // while the detail screen is still showing that edit as a pending
+  // change; it blocks for the animation's duration (about 0.2-0.45s). Does
+  // nothing if this character's detail screen isn't what's on the display.
+  void animateHpRings(const Character &c, int toHp, int toTempHp);
+
 void showCharacterDetail(const Character &c, HpAddTarget addTarget, int pendingHp, int pendingTempHp,
                           int pendingDelta, bool sending, bool justSent,
                           const MovementIndicator &move = MovementIndicator(),
