@@ -10,7 +10,9 @@
  * HTTP surface is deliberately tiny:
  *   GET  /characters          -> every character checked "Send to HP
  *                                Monitor" in Foundry, full data, in one
- *                                response.
+ *                                response. Each entry includes the
+ *                                character's token elevation (null if it
+ *                                has no token placed).
  *   POST /characters/update   -> update one of those characters' hp/tempHp.
  *   POST /tokens/move         -> preview-only: set a target for a
  *                                character's token (absolute {col, row}
@@ -24,8 +26,13 @@
  *                                /tokens/move call for a given uuid.
  *   POST /tokens/move/cancel  -> discard the pending target set by
  *                                /tokens/move for a given uuid.
+ *   POST /tokens/elevation   -> view or change a character's token
+ *                                elevation. Body {uuid} alone just reads
+ *                                it; add elevation (absolute) or
+ *                                dElevation (relative offset) to change it.
  *   POST /tokens/circle         -> drop a real, persistent circular map
- *                                 template centered on a character's
+ *                                 region (Foundry v14 Scene Region)
+ *                                 centered on a character's
  *                                 token, optionally self-deleting after
  *                                 durationMs. Implicitly clears any live
  *                                 preview from /tokens/circle/preview.
@@ -182,7 +189,8 @@ const app = express();
 app.use(express.json());
 
 // One GET, returns every checked character's full data.
-// Response: {"characters":[{"uuid","name","hp","maxHp","tempHp"}, ...]}
+// Response: {"characters":[{"uuid","name","hp","maxHp","tempHp","elevation"}, ...]}
+// "elevation" is null for a character with no token placed on any scene.
 app.get("/characters", async (req, res) => {
   try {
     const result = await callFoundry("list", {});
@@ -211,6 +219,56 @@ app.post("/characters/update", async (req, res) => {
       return;
     }
     res.json({ ok: true, character: result.character });
+  } catch (err) {
+    res.status(504).json({ error: String(err.message || err) });
+  }
+});
+
+// Views or changes the elevation of a character's token.
+//   {"uuid":"..."}                      -> read only, changes nothing
+//   {"uuid":"...", "elevation":15}      -> set an absolute elevation
+//   {"uuid":"...", "dElevation":-5}     -> add an offset to the current
+//                                          elevation (safe for an encoder
+//                                          that sends +1/-1 per click)
+// If both elevation and dElevation are given, elevation wins. Values are
+// in the scene's distance units (feet/meters/etc).
+// Response: {"ok":true,"uuid","name","elevation","previousElevation","units","sceneId"}
+app.post("/tokens/elevation", async (req, res) => {
+  const { uuid, elevation, dElevation } = req.body || {};
+  if (!uuid) {
+    res.status(400).json({ error: "missing uuid in body" });
+    return;
+  }
+
+  // Reject non-numeric values here with a clear 400 rather than letting
+  // Foundry choke on them. null/undefined mean "not provided".
+  const isProvided = (v) => v !== undefined && v !== null;
+  for (const [name, value] of [["elevation", elevation], ["dElevation", dElevation]]) {
+    if (isProvided(value) && (typeof value === "boolean" || value === "" || !Number.isFinite(Number(value)))) {
+      res.status(400).json({ error: `${name} must be a number` });
+      return;
+    }
+  }
+
+  try {
+    const result = await callFoundry("elevation", {
+      uuid,
+      elevation: isProvided(elevation) ? Number(elevation) : undefined,
+      dElevation: isProvided(dElevation) ? Number(dElevation) : undefined
+    });
+    if (!result.ok) {
+      res.status(502).json({ error: result.error || "elevation failed" });
+      return;
+    }
+    res.json({
+      ok: true,
+      uuid: result.uuid,
+      name: result.name,
+      elevation: result.elevation,
+      previousElevation: result.previousElevation,
+      units: result.units,
+      sceneId: result.sceneId
+    });
   } catch (err) {
     res.status(504).json({ error: String(err.message || err) });
   }
@@ -290,7 +348,8 @@ app.post("/tokens/move/cancel", async (req, res) => {
   }
 });
 
-// Drops a circular map template centered on a character's token.
+// Drops a circular map region (Scene Region; v14 replaced MeasuredTemplate)
+// centered on a character's token.
 // Body: {"uuid":"...", "radius":10, "color":"#ff0000", "durationMs":4000}
 app.post("/tokens/circle", async (req, res) => {
   const { uuid, radius, color, durationMs } = req.body || {};
@@ -304,7 +363,8 @@ app.post("/tokens/circle", async (req, res) => {
       res.status(502).json({ error: result.error || "circle failed" });
       return;
     }
-    res.json({ ok: true, templateId: result.templateId, sceneId: result.sceneId });
+    // templateId is the same value as regionId, kept for older clients.
+    res.json({ ok: true, regionId: result.regionId, templateId: result.templateId, sceneId: result.sceneId });
   } catch (err) {
     res.status(504).json({ error: String(err.message || err) });
   }
@@ -315,7 +375,7 @@ app.post("/tokens/circle", async (req, res) => {
 // touching any real document. Safe to call repeatedly as a radius is
 // dialed in (e.g. from a physical controller's circle mode); each call
 // replaces the previous preview. Follow up with /tokens/circle to commit
-// it as a real, persistent template (which implicitly clears this
+// it as a real, persistent region (which implicitly clears this
 // preview), or /tokens/circle/cancel to discard it.
 // Body: {"uuid":"...", "radius":10, "color":"#ff0000", "timeoutMs":15000}
 app.post("/tokens/circle/preview", async (req, res) => {

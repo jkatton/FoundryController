@@ -19,9 +19,13 @@
 // surface:
 //
 //   GET  /characters          -> every opted-in character's full data:
-//                                 {"characters":[{"uuid","name","hp","maxHp","tempHp"}, ...]}
+//                                 {"characters":[{"uuid","name","hp","maxHp","tempHp","elevation"}, ...]}
+//                                 ("elevation" is null for a character with no token placed)
 //   POST /characters/update   -> body {"uuid":"...","hp":N,"tempHp":N}
 //                                 updates one of those characters
+//   POST /tokens/elevation    -> body {"uuid":"...","elevation":N}
+//                                 sets the elevation of a character's token;
+//                                 the response reports the resulting value
 //   POST /tokens/move         -> body {"uuid":"...","col":N,"row":N,"timeoutMs":N}
 //                                 or  {"uuid":"...","dCol":N,"dRow":N,"timeoutMs":N}
 //                                 sets (but does not yet commit) a target
@@ -66,7 +70,7 @@
 // #if this used to be. Defaults to RELAY_TEST_MODE from config.h. When
 // enabled, connect()/fetchCharacters()/updateCharacterHp()/previewMove()/
 // previewMoveRelative()/confirmMove()/cancelMove()/createCircle()/
-// previewCircle()/cancelCirclePreview() skip the relay's HTTP surface
+// previewCircle()/cancelCirclePreview()/setTokenElevation() skip the relay's HTTP surface
 // entirely and operate on a small predefined party kept in RAM instead:
 // connect() "succeeds" after a short simulated delay, so
 // showRelayConnecting() is still visible for a beat, and every
@@ -99,7 +103,7 @@ namespace RelayClient
   // Mock party (test mode)
   // -----------------------------------------------------------------------
   static void addMockCharacter(std::vector<Character> &v, const char *uuid, const char *name,
-                               int hp, int maxHp, int tempHp)
+                               int hp, int maxHp, int tempHp, float elevation = 0)
   {
     Character c;
     c.uuid = uuid;
@@ -107,6 +111,8 @@ namespace RelayClient
     c.hp = hp;
     c.maxHp = maxHp;
     c.tempHp = tempHp;
+    c.elevation = elevation;
+    c.hasElevation = true;
     v.push_back(c);
   }
 
@@ -119,10 +125,10 @@ namespace RelayClient
     if (!initialized)
     {
       addMockCharacter(party, "mock-uuid-1", "Thalric Ironvein", 42, 54, 5);         // green, temp HP
-      addMockCharacter(party, "mock-uuid-2", "Sable Nightshade", 18, 36, 0);         // yellow
+      addMockCharacter(party, "mock-uuid-2", "Sable Nightshade", 18, 36, 0, 15);     // yellow, 15 up
       addMockCharacter(party, "mock-uuid-3", "Boulder", 60, 60, 0);                  // green, full/max HP
-      addMockCharacter(party, "mock-uuid-4", "Pip Quickfingers", 3, 22, 2);          // red, temp HP
-      addMockCharacter(party, "mock-uuid-5", "Longname von Blahdeeblah", 60, 65, 0); // red, temp HP
+      addMockCharacter(party, "mock-uuid-4", "Pip Quickfingers", 3, 22, 2, -10);     // red, temp HP, 10 down
+      addMockCharacter(party, "mock-uuid-5", "Longname von Blahdeeblah", 60, 65, 0, 120); // red, temp HP, 3-digit elevation
       initialized = true;
     }
     return party;
@@ -176,6 +182,18 @@ namespace RelayClient
     out.hp = obj["hp"] | 0;
     out.maxHp = obj["maxHp"] | 1;
     out.tempHp = obj["tempHp"] | 0;
+
+    // null/absent means the character has no token placed on any scene.
+    if (obj["elevation"].isNull())
+    {
+      out.hasElevation = false;
+      out.elevation = 0;
+    }
+    else
+    {
+      out.hasElevation = true;
+      out.elevation = obj["elevation"].as<float>();
+    }
     return true;
   }
 
@@ -595,6 +613,48 @@ namespace RelayClient
 
     if (outCleared)
       *outCleared = respDoc["cleared"] | false;
+    return true;
+  }
+
+  bool setTokenElevation(const String &uuid, float elevation, float *outElevation)
+  {
+    if (s_testMode)
+    {
+      for (auto &c : mockParty())
+      {
+        if (c.uuid == uuid)
+        {
+          c.elevation = elevation;
+          c.hasElevation = true;
+          if (outElevation)
+            *outElevation = elevation;
+          return true;
+        }
+      }
+      s_lastError = "mock: no character with uuid " + uuid;
+      return false;
+    }
+
+    if (!s_connected)
+    {
+      s_lastError = "not connected";
+      return false;
+    }
+
+    JsonDocument reqDoc;
+    reqDoc["uuid"] = uuid;
+    reqDoc["elevation"] = elevation;
+
+    JsonDocument respDoc;
+    String errOut;
+    if (!doPost("/tokens/elevation", reqDoc, respDoc, errOut))
+    {
+      s_lastError = errOut;
+      return false;
+    }
+
+    if (outElevation)
+      *outElevation = respDoc["elevation"] | elevation;
     return true;
   }
 

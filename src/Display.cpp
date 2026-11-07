@@ -92,7 +92,8 @@ namespace Display
 #define COL_HP_WARN TFT_YELLOW
 #define COL_HP_BAD TFT_RED
 #define COL_TEMP 0x051F   // light blue for temp hp
-#define COL_CIRCLE 0xFBE0 // warm orange for the persistent circle-radius readout - distinct from temp hp's blue and the cyan accent
+#define COL_CIRCLE 0xA29F // light purple for the circle-radius readout and circle mode - distinct from temp hp's blue and the cyan accent
+#define COL_ELEV 0xFBE0   // warm orange for the token elevation readout and elevation mode - distinct from the blue/cyan/purple above
 
 // HP ring's inner radius (see showCharacterDetail()'s hpInnerR, which this
 // must be kept in sync with) - hoisted up here so drawTextRow() callers
@@ -752,7 +753,6 @@ static int ringHoleHalfWidth(int absDy)
     ROW_NAME2,
     ROW_HP,
     ROW_TEMP,
-    ROW_CIRCLE,
     ROW_DELTA,
     ROW_STATUS_1,
     ROW_STATUS_2,
@@ -937,8 +937,153 @@ static int ringHoleHalfWidth(int absDy)
     return String((int)roundf(distance));
   }
 
+  // Elevation as a plain rounded number (no unit, no "+" sign), clamped to
+  // what fits in the small readout beside the name (4 characters, e.g.
+  // "-999"). Shared by that readout and elevation mode's big number.
+  static String formatElevation(float elevation)
+  {
+    int v = (int)roundf(elevation);
+    if (v < -999)
+      v = -999;
+    if (v > 9999)
+      v = 9999;
+    return String(v);
+  }
+
+  // Elevation mode's icon, drawn in the same fixed spot as the move arrow/
+  // circle ring: an up triangle stacked over a down triangle. Same cheap-
+  // no-op-on-unchanged approach as drawCircleIcon().
+  static void drawElevationIcon(int cx, int cy, bool active, bool forceRedraw)
+  {
+    static bool s_lastActive = false;
+
+    if (!forceRedraw && active == s_lastActive)
+      return;
+
+    const int ICON_R = 12; // matches drawCircleIcon's ICON_R scale
+    const int CLEAR_R = ICON_R + 4;
+    tft.fillRect(cx - CLEAR_R, cy - CLEAR_R, CLEAR_R * 2, CLEAR_R * 2, COL_BG);
+
+    if (active)
+    {
+      tft.fillTriangle(cx, cy - ICON_R, cx - 8, cy - 2, cx + 8, cy - 2, COL_ELEV); // up
+      tft.fillTriangle(cx, cy + ICON_R, cx - 8, cy + 2, cx + 8, cy + 2, COL_ELEV); // down
+    }
+
+    s_lastActive = active;
+  }
+
+  // The top or bottom arc of a 2px-thick circle of radius r centered on
+  // (cx, cy), trimmed to |x| <= maxX and |y| >= yMin. Drawn around the
+  // number in drawSideReadout() these are the flattened caps of one big ring
+  // that would enclose it - the sides, where the number is, are simply left
+  // out. TFT_eSPI has no clipped drawCircle, so each stroke (radius r and
+  // r-1) is drawn as a short polyline along the arc, swept from one trimmed
+  // end to the other through the apex.
+  static void drawRingCap(int cx, int cy, int r, int maxX, int yMin, bool top, uint16_t color)
+  {
+    const int sign = top ? -1 : 1;
+    // Angle from straight up/down at which the arc hits the x or y trim,
+    // whichever comes first.
+    const float phiMax = min(asinf((float)maxX / r), acosf((float)yMin / r));
+    const int SEGMENTS = 10; // per side of the apex
+
+    for (int rr = r; rr >= r - 1; rr--)
+    {
+      int prevX = 0, prevY = 0;
+      for (int i = -SEGMENTS; i <= SEGMENTS; i++)
+      {
+        float phi = phiMax * (float)i / SEGMENTS;
+        int x = cx + (int)roundf(rr * sinf(phi));
+        int y = cy + sign * (int)roundf(rr * cosf(phi));
+        if (i > -SEGMENTS)
+          tft.drawLine(prevX, prevY, x, y, color);
+        prevX = x;
+        prevY = y;
+      }
+    }
+  }
+
+  // The two small side readouts flanking the character name: elevation
+  // (orange, left of the name) and the drawn circle's radius (purple, right
+  // of the name). Each is the value centered in the strip of ring-hole
+  // beside the name, with its icon split around it: one half above the
+  // number and the other half below (an up triangle above / a down triangle
+  // below for elevation, the flattened top and bottom caps of a ring that
+  // would enclose the number for the circle radius) - the same idea as the
+  // big mode icons, just split and scaled down.
+  //
+  // There isn't much room: names are at most CHAR_NAME_LINE_MAX_LEN (10)
+  // characters of size-2 text, i.e. 120px centered on SCREEN_CX, which at
+  // the widest leaves roughly 28px between the name and the ring's inner
+  // edge on each side. So each readout lives in a fixed 28px-wide column
+  // centered 78px either side of SCREEN_CX, with the number vertically
+  // centered on the middle of the screen (SCREEN_CY) and the icon halves above and below it,
+  // and the number is size 2 when it's 1-2 characters (the common case:
+  // 5/10/15/20...) and drops to size 1 for longer ones so it never outgrows
+  // the column. Drawn with its own fixed-size blanking rect rather than
+  // through drawTextRow(), since that helper centers text around SCREEN_CX
+  // and can't place it in a side column. An empty `text` just clears the
+  // column (nothing to show: no circle drawn / no token / feature off).
+  static void drawSideReadout(bool rightSide, const String &text, uint16_t color, bool ringIcon, bool forceRedraw)
+  {
+    static String s_lastText[2];
+    const int idx = rightSide ? 1 : 0;
+
+    if (!forceRedraw && text == s_lastText[idx])
+      return;
+
+    const int cx = rightSide ? (SCREEN_CX + 78) : (SCREEN_CX - 78);
+    const int numY = SCREEN_CY;
+    const int ICON_GAP = 11; // distance from the number's center line to the flat edge of each icon half (the size-2 text's half-height is 8, plus a 3px gap)
+    const int ICON_H = 9;    // height of each triangle
+    const int ICON_UP_SHIFT = 2; // the up triangle sits this much higher than the down one: size-2 digits only fill the top 14 of their 16px
+                                 // cell, so they sit ~1px above the cell center and the gap above would otherwise look ~2px tighter than below
+    const int ICON_PAD = 4;      // blanking margin beyond the icons
+    const int halfW = 14; // column spans cx-14..cx+14 = 28px, clear of both the widest name and the ring's inner edge
+
+    const int clearHalfH = ICON_GAP + ICON_H + ICON_UP_SHIFT + ICON_PAD;
+    tft.fillRect(cx - halfW, SCREEN_CY - clearHalfH, halfW * 2, clearHalfH * 2, COL_BG);
+
+    if (text.length() > 0)
+    {
+      const uint8_t numSize = text.length() <= 2 ? 2 : 1;
+      tft.setTextSize(numSize);
+      tft.setTextDatum(MC_DATUM);
+      tft.setTextColor(color, COL_BG);
+      // The built-in font's glyph cells are 6px wide with the 6th column
+      // always blank, so a string centered on cx has its visible digits
+      // sitting numSize/2 px left of cx (a full pixel at size 2) - which
+      // shows up against the perfectly symmetric icons above and below it.
+      // Nudge the text right by that much so the digits line up with them.
+      tft.drawString(text, cx + numSize / 2, numY);
+
+      if (ringIcon)
+      {
+        // Flattened top and bottom caps of one ring (radius 17) centered on
+        // the number - trimmed to the 13px either side of center the column
+        // has room for and to 11px above/below the center line, which clears
+        // the number. Centered 1px above SCREEN_CY for the same
+        // digits-sit-high reason as ICON_UP_SHIFT.
+        const int ringCy = SCREEN_CY - 1;
+        drawRingCap(cx, ringCy, 17, 13, 11, true, color);
+        drawRingCap(cx, ringCy, 17, 13, 11, false, color);
+      }
+      else
+      {
+        // Up triangle above the number, down triangle below it.
+        const int tw = 8; // half-width of each triangle's base
+        const int upBase = SCREEN_CY - ICON_GAP - ICON_UP_SHIFT;
+        tft.fillTriangle(cx, upBase - ICON_H, cx - tw, upBase, cx + tw, upBase, color);
+        tft.fillTriangle(cx, SCREEN_CY + ICON_GAP + ICON_H, cx - tw, SCREEN_CY + ICON_GAP, cx + tw, SCREEN_CY + ICON_GAP, color);
+      }
+    }
+    s_lastText[idx] = text;
+  }
+
   void showCharacterDetail(const Character &c, HpAddTarget addTarget, int pendingHp, int pendingTempHp,
-                           int pendingDelta, bool sending, bool justSent, const MovementIndicator &move, const CircleIndicator &circle)
+                           int pendingDelta, bool sending, bool justSent, const MovementIndicator &move, const CircleIndicator &circle,
+                           const ElevationIndicator &elev)
   {
     s_listValid = false;
 
@@ -1104,16 +1249,48 @@ static int ringHoleHalfWidth(int absDy)
 
     drawTextRow(ROW_HP, SCREEN_CY - 48, 26, String(displayHp) + "/" + String(c.maxHp), 3, hpColor, freshCharacter);
 
-    drawTextRow(ROW_TEMP, SCREEN_CY - 82, 14, displayTempHp > 0 ? ("+" + String(displayTempHp) + " temp") : "", 1, COL_TEMP, freshCharacter);
+    // Temp HP is the only thing above the HP numbers: the "+N" at size 2,
+    // centered on the screen, with a small size-1 "temp" label to its right
+    // sitting on the same bottom edge as the number. The number goes through
+    // drawTextRow() as usual (its blanking clamp keeps even "+125" from
+    // touching the ring); the label is drawn separately since it's anchored
+    // to the number's right edge rather than the screen center, so it needs
+    // redrawing - and its old position blanking - whenever the number's
+    // width changes.
+    {
+      const int tempY = SCREEN_CY - 76;
+      String tempNum = displayTempHp > 0 ? ("+" + String(displayTempHp)) : String("");
 
-    // Circle radius readout, styled the same way as the temp HP row right
-    // above it - shown whenever a circle currently exists on the map for
-    // this character (circle.drawn), independent of whether the encoder is
-    // actively dialing it right now (circle.active, handled separately
-    // below) or of whichever of HP/move the big sub-display area is
-    // currently showing. Blank (and so invisible) when no circle is drawn,
-    // same on/off pattern as the temp-HP row's "only show when > 0" check.
-    drawTextRow(ROW_CIRCLE, SCREEN_CY - 70, 14, circle.drawn ? (formatDistanceFt(circle.radius) + " ft radius") : "", 1, COL_CIRCLE, freshCharacter);
+      static String s_lastTempNum;
+      static int s_lastTempLabelX = -1;
+      bool tempChanged = freshCharacter || tempNum != s_lastTempNum;
+
+      drawTextRow(ROW_TEMP, tempY, 18, tempNum, 2, COL_TEMP, freshCharacter, 0, ringHoleHalfWidth(85) - 4);
+
+      if (tempChanged)
+      {
+        const int labelBottom = tempY + 8; // bottom edge of the size-2 text cell
+        if (s_lastTempLabelX >= 0)
+          tft.fillRect(s_lastTempLabelX - 1, labelBottom - 9, 28, 10, COL_BG);
+
+        if (tempNum.length() > 0)
+        {
+          tft.setTextSize(2);
+          int numW = tft.textWidth(tempNum);
+          int labelX = SCREEN_CX + numW / 2 + 4;
+          tft.setTextSize(1);
+          tft.setTextDatum(BL_DATUM);
+          tft.setTextColor(COL_TEMP, COL_BG);
+          tft.drawString("temp", labelX, labelBottom);
+          s_lastTempLabelX = labelX;
+        }
+        else
+        {
+          s_lastTempLabelX = -1;
+        }
+        s_lastTempNum = tempNum;
+      }
+    }
 
     // Always relative now - the dial's raw +/- delta, and which pool a
     // positive turn feeds. Subtracting always drains temp HP first regardless
@@ -1127,10 +1304,13 @@ static int ringHoleHalfWidth(int absDy)
     // rather than being cancelled.
     static bool s_lastMoveActive = false;
     static bool s_lastCircleActive = false;
-    bool subModeChanged = (move.active != s_lastMoveActive) || (circle.active != s_lastCircleActive);
+    static bool s_lastElevActive = false;
+    bool subModeChanged = (move.active != s_lastMoveActive) || (circle.active != s_lastCircleActive) ||
+                          (elev.active != s_lastElevActive);
     bool forceRowsRedraw = freshCharacter || subModeChanged;
     s_lastMoveActive = move.active;
     s_lastCircleActive = circle.active;
+    s_lastElevActive = elev.active;
 
     if (forceRowsRedraw)
     {
@@ -1154,12 +1334,28 @@ static int ringHoleHalfWidth(int absDy)
       tft.fillRect(SCREEN_CX - BAND_HALF_WIDTH, (SCREEN_CY + 36) - 20, BAND_HALF_WIDTH * 2, 40, COL_BG);
     }
 
+    // Side readouts flanking the name (see drawSideReadout()): token
+    // elevation in orange on the left (showing the value being dialed while
+    // elevation mode is open, so it tracks the encoder live), drawn-circle
+    // radius in purple on the right. Elevation is shown only when it's non-zero (a token on the
+    // ground has nothing worth showing), whether or not Height Mode is on, and
+    // never for a character with no token; the radius shows whenever a circle currently exists on the
+    // map for this character (circle.drawn), independent of whether the
+    // encoder is dialing it (circle.active) or which of HP/move the big
+    // sub-display below is showing. Drawn after the
+    // band clear just above (and force-redrawn along with it) because their
+    // icons sit low enough to overlap that band's top edge.
+    const bool showElevation = elev.known && (int)roundf(elev.pending) != 0;
+    drawSideReadout(false, showElevation ? formatElevation(elev.pending) : String(""), COL_ELEV, false, forceRowsRedraw);
+    drawSideReadout(true, circle.drawn ? formatDistanceFt(circle.radius) : String(""), COL_CIRCLE, true, forceRowsRedraw);
+
     const int ARROW_CX = SCREEN_CX - 34;
     const int ARROW_CY = SCREEN_CY + 36;
 
     if (circle.active)
     {
       drawMoveArrow(ARROW_CX, ARROW_CY, false, 0, 0, forceRowsRedraw); // this row belongs to circle mode now - arrow slot stays blank
+      drawElevationIcon(ARROW_CX, ARROW_CY, false, forceRowsRedraw);
       drawCircleIcon(ARROW_CX, ARROW_CY, true, forceRowsRedraw);
 
       String radiusStr = formatDistanceFt(circle.radius);
@@ -1173,9 +1369,33 @@ static int ringHoleHalfWidth(int absDy)
       return;
     }
 
+    if (elev.active)
+    {
+      drawMoveArrow(ARROW_CX, ARROW_CY, false, 0, 0, forceRowsRedraw); // this row belongs to elevation mode now - other icon slots stay blank
+      drawCircleIcon(ARROW_CX, ARROW_CY, false, forceRowsRedraw);
+      drawElevationIcon(ARROW_CX, ARROW_CY, true, forceRowsRedraw);
+
+      // The value being dialed (absolute, not a +/- delta), same size/
+      // position treatment as circle mode's radius.
+      drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, formatElevation(elev.pending), 4, COL_ELEV, forceRowsRedraw, 30);
+
+      if (elev.sending)
+      {
+        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Sending...", 1, COL_ACCENT, forceRowsRedraw, 0, statusRow1HalfWidth);
+        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, " ", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+      }
+      else
+      {
+        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + ":set " + longLabel(labelA()) + ":cancel", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
+        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, shortLabel(labelB()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+      }
+      return;
+    }
+
     if (move.active)
     {
       drawCircleIcon(ARROW_CX, ARROW_CY, false, forceRowsRedraw); // this row belongs to move mode now - circle icon slot stays blank
+      drawElevationIcon(ARROW_CX, ARROW_CY, false, forceRowsRedraw);
       drawMoveArrow(ARROW_CX, ARROW_CY, true, move.dCol, move.dRow, forceRowsRedraw);
 
       // Distance to the accumulated target, beside the arrow - same size/
@@ -1190,7 +1410,10 @@ static int ringHoleHalfWidth(int absDy)
       // No "Moving..." status while a preview is in flight - same reasoning
       // as the circle branch above; the hint row just stays put.
       drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + ":move " + longLabel(labelA()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
-      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, circle.enabled ? (shortLabel(labelB()) + ":ring") : String(""), 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+      // Second hint row intentionally left blank in move mode: the Button B
+      // ":elev" / ":ring" hints that used to live here were removed to keep
+      // this screen uncluttered.
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, String(""), 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
       return;
     }
 
@@ -1200,6 +1423,7 @@ static int ringHoleHalfWidth(int absDy)
     // pending-HP-delta rendering.
     drawMoveArrow(ARROW_CX, ARROW_CY, false, 0, 0, forceRowsRedraw);
     drawCircleIcon(ARROW_CX, ARROW_CY, false, forceRowsRedraw);
+    drawElevationIcon(ARROW_CX, ARROW_CY, false, forceRowsRedraw);
 
     String deltaStr = (pendingDelta > 0 ? "+" : "") + String(pendingDelta);
     deltaStr = (pendingDelta == 0 ? "-" : deltaStr);
@@ -1231,7 +1455,7 @@ static int ringHoleHalfWidth(int absDy)
       drawTextRow(ROW_DELTA, SCREEN_CY + 36, 32, " ", 4, COL_DIM, forceRowsRedraw);
     }
 
-    if (sending)
+    if (sending || elev.sending) // elevation is applied on screen right away, so its "Sending..." shows here, outside elevation mode
     {
       drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Sending...", 1, COL_ACCENT, forceRowsRedraw, 0, statusRow1HalfWidth);
       drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, " ", 1, COL_DIM, forceRowsRedraw);

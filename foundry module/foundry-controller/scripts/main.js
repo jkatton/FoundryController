@@ -13,8 +13,15 @@
  * EXPOSABLE_ACTOR_TYPES below) - loot, parties, and other non-combatant
  * types never get the toggle. Only checked actors are ever included in the
  * data sent out. Request types:
- *   - "list"   -> every checked actor's full hp/maxHp/tempHp/name
+ *   - "list"   -> every checked actor's full hp/maxHp/tempHp/name, plus the
+ *                 elevation of its token (null if it has no token placed)
  *   - "update" -> set one checked actor's hp/tempHp
+ *   - "elevation" -> view or change one checked actor's token elevation.
+ *                 {uuid} alone just reads it; {uuid, elevation} sets an
+ *                 absolute value; {uuid, dElevation} adds a (possibly
+ *                 negative) offset to the current value, safe for an
+ *                 encoder that sends +1/-1 per click. Elevation is in the
+ *                 scene's distance units (feet/meters/etc).
  *   - "move"        -> preview-only: set a target for one checked actor's
  *                      token and get back the distance to it, without
  *                      actually moving anything yet - like hovering a drag
@@ -36,7 +43,8 @@
  *                      "moveCancel" (or a fresh "move").
  *   - "moveConfirm" -> commit the target set by the last "move" for {uuid}
  *   - "moveCancel"  -> discard the pending target set by "move" for {uuid}
- *   - "circle"        -> drop a real, persistent circular MeasuredTemplate
+ *   - "circle"        -> drop a real, persistent circular Scene Region
+ *                        (v14 removed MeasuredTemplate; Regions replace it)
  *                        centered on one checked actor's token, e.g.
  *                        {radius, color, durationMs}. Implicitly clears
  *                        any live preview from "circlePreview" below. For
@@ -59,7 +67,7 @@
  *                        a circle".
  *   - "circlePreview" -> live, local-only preview of a circle's radius
  *                        centered on one checked actor's token - renders
- *                        via a real (unsaved) MeasuredTemplate object, so
+ *                        via a real (unsaved) Region object, so
  *                        it looks identical to a confirmed "circle"
  *                        (including the highlighted/hatched grid squares,
  *                        the size/edge-measurement adjustments, and the
@@ -204,6 +212,9 @@ class FoundryControllerConnection {
         case "update":
           result = await this._updateCharacter(payload?.uuid, payload?.hp, payload?.tempHp);
           break;
+        case "elevation":
+          result = await this._tokenElevation(payload?.uuid, payload?.elevation, payload?.dElevation);
+          break;
         case "move":
           result = await this._previewMove(payload?.uuid, payload?.col, payload?.row, payload?.dCol, payload?.dRow, payload?.timeoutMs);
           break;
@@ -257,12 +268,15 @@ class FoundryControllerConnection {
 
   _actorToCharacter(actor) {
     const hp = foundry.utils.getProperty(actor, "system.attributes.hp") ?? {};
+    const tokenDoc = this._resolveActorToken(actor);
     return {
       uuid: actor.uuid,
       name: actor.name,
       hp: Number(hp.value ?? 0),
       maxHp: Number(hp.max ?? 0),
-      tempHp: Number(hp.temp ?? 0)
+      tempHp: Number(hp.temp ?? 0),
+      // null when the actor has no token placed on any scene.
+      elevation: tokenDoc ? this._finalElevation(tokenDoc) : null
     };
   }
 
@@ -397,6 +411,60 @@ class FoundryControllerConnection {
 
     await actor.update(update);
     return { ok: true, character: this._actorToCharacter(actor) };
+  }
+
+  // The token's elevation as stored, i.e. the final value an update has set
+  // - not the live document property, which Foundry can step through
+  // intermediate values while it animates a change on the canvas (so a
+  // controller refreshing mid-animation would otherwise see the number
+  // "slowly build up" to the target). Falls back to the live value if the
+  // stored source isn't available.
+  _finalElevation(tokenDoc) {
+    return Number(tokenDoc?._source?.elevation ?? tokenDoc?.elevation ?? 0);
+  }
+
+  // Views or changes the elevation of one checked actor's token, mirroring
+  // _updateCharacter() for HP. With neither value given it's a pure read;
+  // `elevation` sets an absolute value and `dElevation` adds an offset to
+  // whatever the token's elevation currently is (if both are given,
+  // `elevation` wins). Uses the same token lookup as move/circle, so it
+  // works even when the bridge client isn't viewing that token's scene.
+  async _tokenElevation(uuid, elevation, dElevation) {
+    if (!uuid) return { ok: false, error: "missing uuid" };
+    const actor = this._resolveActor(uuid);
+    const authError = this._authorizeActorAction(actor);
+    if (authError) return authError;
+
+    const tokenDoc = this._resolveActorToken(actor);
+    if (!tokenDoc) return { ok: false, error: "actor has no token placed on any scene" };
+
+    const hasAbsolute = elevation !== undefined && elevation !== null;
+    const hasDelta = dElevation !== undefined && dElevation !== null;
+    const current = this._finalElevation(tokenDoc);
+
+    if (hasAbsolute || hasDelta) {
+      const target = hasAbsolute ? Number(elevation) : current + Number(dElevation);
+      if (!Number.isFinite(target)) return { ok: false, error: "elevation must be a number" };
+
+      if (target !== current) {
+        try {
+          await tokenDoc.update({ elevation: target });
+        } catch (err) {
+          warn("Failed to update token elevation:", err);
+          return { ok: false, error: `failed to update elevation: ${err?.message ?? err}` };
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      uuid: actor.uuid,
+      name: actor.name,
+      elevation: this._finalElevation(tokenDoc),
+      previousElevation: current,
+      units: tokenDoc.parent?.grid?.units ?? null,
+      sceneId: tokenDoc.parent?.id ?? null
+    };
   }
 
   // "Hover" step, mirroring how dragging a token with the mouse works:
@@ -623,11 +691,13 @@ class FoundryControllerConnection {
     this.pendingMoves.delete(actorUuid);
   }
 
-  // Drops a circular MeasuredTemplate centered on the actor's token, e.g.
-  // for a physical "ping" button. radius is in the scene's distance units
-  // (feet/meters/etc, whatever the scene is configured for) - defaults to
-  // one grid square's worth if omitted. If durationMs is given, the
-  // template deletes itself after that delay instead of persisting.
+  // Drops a circular Scene Region centered on the actor's token, e.g.
+  // for a physical "ping" button. (Foundry v14 removed the MeasuredTemplate
+  // document; Regions with a circle shape are the replacement.) radius is in
+  // the scene's distance units (feet/meters/etc, whatever the scene is
+  // configured for) - defaults to one grid square's worth if omitted. If
+  // durationMs is given, the region deletes itself after that delay instead
+  // of persisting.
   async _createCircle(uuid, radius, { color, durationMs } = {}) {
     if (!uuid) return { ok: false, error: "missing uuid" };
     const actor = this._resolveActor(uuid);
@@ -645,75 +715,148 @@ class FoundryControllerConnection {
 
     // Requested radius plus (for Large+ tokens) however far the token's own
     // footprint extends past its center - see _tokenFootprintRadiusUnits().
-    // Foundry's MeasuredTemplate renders/highlights a circle's "distance" as
-    // a radius from (x, y), so bumping this one field is enough to move the
-    // rendered edge, border, and grid highlight out to the token's edge -
-    // no separate adjustment needed elsewhere for the confirmed template.
-    const requestedDistance = Number(radius) || scene.grid.distance;
+    // A Region circle shape takes its radius in scene pixels, so convert
+    // from scene distance units the same way _previewCircle() does; the
+    // preview's highlighted squares and this region then line up exactly.
+    const requestedDistance = Number(radius) || grid.distance;
     const footprintRadius = this._tokenFootprintRadiusUnits(tokenDoc, grid);
     const totalDistance = requestedDistance + footprintRadius;
+    const pixelRadius = (totalDistance / grid.distance) * grid.size;
 
-    const templateData = {
-      t: "circle",
+    const regionData = this._circleRegionData({
+      name: `${actor.name} circle`,
+      color,
       x: centerX,
       y: centerY,
-      distance: totalDistance,
-      fillColor: color || game.user.color,
-      borderColor: "#000000",
-      author: game.user.id
-    };
+      pixelRadius,
+      flags: { circle: true, actorUuid: actor.uuid }
+    });
 
     // Replace whatever live preview (see _previewCircle()) this real,
-    // persistent template is about to stand in for - otherwise both would
+    // persistent region is about to stand in for - otherwise both would
     // be visible on top of each other for a moment.
     this._clearCirclePreview(actor.uuid);
 
-    const [created] = await scene.createEmbeddedDocuments("MeasuredTemplate", [templateData]);
-    if (!created) return { ok: false, error: "failed to create template" };
+    let created;
+    try {
+      [created] = await scene.createEmbeddedDocuments("Region", [regionData]);
+    } catch (err) {
+      warn("Failed to create circle region:", err);
+      return { ok: false, error: `failed to create region: ${err?.message ?? err}` };
+    }
+    if (!created) return { ok: false, error: "failed to create region" };
 
     if (durationMs) {
       setTimeout(() => {
-        created.delete().catch(err => warn("Failed to auto-delete circle template:", err));
+        // Re-fetch: it may already be gone (manually deleted, scene deleted).
+        const region = scene.regions?.get(created.id);
+        if (!region) return;
+        region.delete().catch(err => warn("Failed to auto-delete circle region:", err));
       }, Number(durationMs));
     }
 
     return {
       ok: true,
-      templateId: created.id,
+      regionId: created.id,
+      templateId: created.id, // kept so existing relay/controller clients don't break
       sceneId: scene.id,
       radius: requestedDistance,
       effectiveRadius: totalDistance
     };
   }
 
+  // Builds the Region data for a circle (shared by the real circle in
+  // _createCircle() and the local preview in _previewCircle(), so the two
+  // always look identical). Region#color wants a CSS color string, but
+  // game.user.color is a Color object (and callers may pass a hex string),
+  // so normalize either.
+  _circleRegionData({ name, color, x, y, pixelRadius, flags = {} }) {
+    let cssColor;
+    try {
+      const ColorClass = foundry.utils?.Color ?? globalThis.Color;
+      cssColor = ColorClass.from(color || game.user.color).css;
+    } catch (err) {
+      warn("Could not parse circle color, falling back to default:", err);
+    }
+
+    return {
+      name,
+      ...(cssColor ? { color: cssColor } : {}),
+      shapes: [{
+        type: "circle",
+        x,
+        y,
+        radius: pixelRadius,
+        hole: false,
+        gridBased: false
+      }],
+      // Visible to everyone all the time (default is only while the Regions
+      // layer is active, which players never see), no wall clipping, no
+      // measurement labels. Left without behaviors and without an elevation
+      // range so it is purely visual and never interacts with other modules
+      // (e.g. elevation regions) or token movement.
+      visibility: CONST.REGION_VISIBILITY?.ALWAYS ?? 2,
+      displayMeasurements: false,
+      highlightMode: "coverage",
+      flags: { [MODULE_ID]: flags }
+    };
+  }
+
+  // Draws a local-only Region placeable (never saved, never sent to the
+  // server) on the Regions layer's preview container - the same pattern
+  // Foundry uses for its own placement previews. Resolves with the placeable
+  // so the caller can destroy it later; rejects if this Foundry version
+  // can't render one, in which case _previewCircle() falls back to
+  // highlighting grid squares directly.
+  async _drawCircleRegionPreview(scene, regionData) {
+    const layer = canvas?.regions;
+    const DocClass = CONFIG.Region?.documentClass;
+    const ObjClass = CONFIG.Region?.objectClass;
+    if (!layer?.preview || !DocClass || !ObjClass) {
+      throw new Error("region preview layer unavailable");
+    }
+
+    const doc = new DocClass(
+      { ...regionData, _id: foundry.utils.randomID() },
+      { parent: scene }
+    );
+    const obj = new ObjClass(doc);
+    layer.preview.addChild(obj);
+    try {
+      await obj.draw();
+    } catch (err) {
+      this._destroyPlaceable(obj);
+      throw err;
+    }
+    return obj;
+  }
+
+  _destroyPlaceable(obj) {
+    try {
+      obj?.destroy?.({ children: true });
+    } catch (err) {
+      warn("Failed to destroy circle preview region:", err);
+    }
+  }
+
   // Live, local-only preview of a circle's radius centered on the actor's
-  // token - highlights the covered grid squares using the same low-level
-  // canvas.interface.grid.highlightPosition() API a real MeasuredTemplate
-  // uses internally for its own grid highlight (see _highlightCircleGrid()
-  // below), giving the same "hatched squares" look as a confirmed circle
-  // (_createCircle) without touching any real document.
+  // token. Draws the same circular Region (_circleRegionData) that a
+  // confirmed "circle" (_createCircle) creates, but as an unsaved local
+  // placeable on canvas.regions.preview, so it looks identical to the final
+  // result without touching any real document.
   //
-  // This intentionally does NOT instantiate a MeasuredTemplate placeable
-  // (new CONFIG.MeasuredTemplate.documentClass/objectClass) the way an
-  // earlier version of this method did - that crashed with "Cannot read
-  // properties of undefined (reading 'getBounds')" inside
-  // MeasuredTemplate#_getGridHighlightPositions(), because that internal
-  // method assumes the template went through Foundry's normal create/
-  // embed lifecycle, which a never-persisted preview object never does.
-  // A RegionDocument-based approach was also considered, but Regions are
-  // a heavier, persistence-oriented document with the same category of
-  // assumption (and Foundry's Grid API has changed enough across recent
-  // versions - see the V12 Grid API rework - that leaning on either
-  // placeable's internal rendering is fragile). Driving the grid highlight
-  // layer directly is the smaller, documented surface both of those
-  // ultimately bottom out in anyway.
+  // If this Foundry version can't render a Region placeable that way (an
+  // earlier MeasuredTemplate-based version of this preview crashed on the
+  // same kind of never-persisted object), it falls back to highlighting the
+  // covered grid squares directly via canvas.interface.grid's named highlight
+  // layers (see _highlightCircleGrid()), which only approximates the look.
   //
-  // A fresh call for the same actor updates the existing preview's radius
-  // rather than stacking a new one, so this is safe (and expected) to call
-  // on every encoder tick while someone dials a radius in - e.g. from a
-  // physical controller's circle mode. Call _createCircle separately to
-  // actually commit it as a real, persistent template (which also clears
-  // this preview automatically - see above).
+  // A fresh call for the same actor replaces the existing preview rather than
+  // stacking a new one, so this is safe (and expected) to call on every
+  // encoder tick while someone dials a radius in - e.g. from a physical
+  // controller's circle mode. Call _createCircle separately to actually
+  // commit it as a real, persistent region (which also clears this preview
+  // automatically - see above).
   async _previewCircle(uuid, radius, color, timeoutMs) {
     if (!uuid) return { ok: false, error: "missing uuid" };
     const actor = this._resolveActor(uuid);
@@ -757,8 +900,37 @@ class FoundryControllerConnection {
       }, effectiveTimeout);
     }
 
-    if (canvas?.ready && canvas.scene?.id === scene.id && canvas.interface?.grid) {
-      this._highlightCircleGrid(highlightName, grid, centerX, centerY, pixelRadius, color || game.user.color);
+    let mode = "none";
+    if (canvas?.ready && canvas.scene?.id === scene.id) {
+      const regionData = this._circleRegionData({
+        name: `${actor.name} circle preview`,
+        color,
+        x: centerX,
+        y: centerY,
+        pixelRadius,
+        flags: { preview: true, actorUuid: actor.uuid }
+      });
+
+      try {
+        const obj = await this._drawCircleRegionPreview(scene, regionData);
+        // A newer call (or circle/circleCancel/timeout) may have replaced or
+        // cleared this preview while it was drawing - don't leave an orphan.
+        if (this.pendingCirclePreviews.get(actor.uuid) !== pending) {
+          this._destroyPlaceable(obj);
+          return { ok: true, preview: { superseded: true } };
+        }
+        pending.graphics.push(obj);
+        mode = "region";
+      } catch (err) {
+        warn("Region preview failed, falling back to grid highlight:", err);
+        if (this.pendingCirclePreviews.get(actor.uuid) !== pending) {
+          return { ok: true, preview: { superseded: true } };
+        }
+        if (canvas.interface?.grid) {
+          this._highlightCircleGrid(highlightName, grid, centerX, centerY, pixelRadius, color || game.user.color);
+          mode = "grid";
+        }
+      }
     }
 
     return {
@@ -767,7 +939,8 @@ class FoundryControllerConnection {
         radius: distanceUnits,
         effectiveRadius: totalDistanceUnits,
         units: scene.grid.units ?? null,
-        sceneId: scene.id
+        sceneId: scene.id,
+        mode
       }
     };
   }
@@ -775,7 +948,7 @@ class FoundryControllerConnection {
   // Highlights every grid square whose center point falls within the given
   // circle (center + pixelRadius, both in scene pixel coordinates), using
   // canvas.interface.grid's named-highlight-layer API - the same primitive
-  // MeasuredTemplate itself calls into for a real circle's grid highlight.
+  // Foundry's own template/region highlighting calls into for a grid highlight.
   // Sweeps the circle's pixel bounding box in grid-offset space rather than
   // pixel space, so this works the same way on square and hex grids (same
   // getOffset/getCenterPoint/getTopLeftPoint calls _previewMove() above
@@ -823,9 +996,9 @@ class FoundryControllerConnection {
     if (!pending) return;
     if (pending.timeoutId) clearTimeout(pending.timeoutId);
     if (pending.highlightName && canvas?.interface?.grid) {
-      canvas.interface.grid.destroyHighlightLayer(pending.highlightName);
+      try { canvas.interface.grid.destroyHighlightLayer(pending.highlightName); } catch (_) { /* layer was never created (region preview mode) */ }
     }
-    for (const obj of pending.graphics) obj.destroy();
+    for (const obj of pending.graphics) this._destroyPlaceable(obj);
     this.pendingCirclePreviews.delete(actorUuid);
   }
 

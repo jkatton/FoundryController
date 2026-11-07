@@ -212,6 +212,22 @@
 // after things settle, rather than once per tick while spinning fast.
 #define CIRCLE_RADIUS_DEBOUNCE_MS 100
 
+// Elevation ("height") mode (opened with a short press of Button B from the
+// character detail screen - see main.cpp's g_elevEditing): encoder step size
+// and bounds for the token's elevation, in the scene's own distance units
+// (feet, meters, ...). Matches dnd5e's 5ft grid by default. Turning the
+// encoder snaps the dialed-in value to the next multiple of ELEVATION_STEP in
+// the direction of the turn (so a token at 7 goes to 10 or 5, not 12 or 2),
+// the same way the circle radius moves in CIRCLE_RADIUS_STEP increments. Keep
+// the bounds multiples of the step; they also keep the on-screen readout
+// within four characters (e.g. "-995").
+#define ELEVATION_STEP   5
+#define ELEVATION_REFRESH_HOLD_MS 6000 // after sending an elevation, ignore the elevation in background refreshes for this long, so a
+                                       // refresh that lands while Foundry is still animating the change can't show an intermediate
+                                       // value - the target stays on screen, then the polled value takes over again
+#define ELEVATION_MIN   -995
+#define ELEVATION_MAX    995
+
 
 
 

@@ -10,6 +10,8 @@ struct Character {
   int hp = 0;         // system.attributes.hp.value
   int maxHp = 1;       // system.attributes.hp.max
   int tempHp = 0;      // system.attributes.hp.temp
+  float elevation = 0;     // the character's token elevation, in scene distance units (feet/meters/...)
+  bool hasElevation = false; // false when the relay reported null (character has no token placed on any scene)
 };
 
 // Application state machine
@@ -83,12 +85,19 @@ struct AppSettings {
                                                   // disorienting, so this only takes effect once the draft is saved
                                                   // (see main.cpp's exitSettingsSave()) - same reasoning/pattern as
                                                   // tableOrientation and moveButtonsEnabled above.
-  bool circleEnabled = true;                      // when false, Button B presses on the character detail screen are
-                                                  // ignored entirely (see main.cpp's handleCharacterDetail()) so
+  bool circleEnabled = true;                      // when false, long presses of Button B on the character detail screen
+                                                  // are ignored entirely (see main.cpp's handleCharacterDetail()) so
                                                   // circle mode can't be opened, and the ":ring" hint is hidden
                                                   // (CircleIndicator::enabled). Button B is still polled every loop
                                                   // as usual so its debounce state stays correct - same pattern as
                                                   // moveButtonsEnabled above.
+  bool elevationEnabled = true;                   // "Height Mode" on the settings screen. When false, short presses of
+                                                  // Button B on the character detail screen are ignored entirely (see
+                                                  // main.cpp's handleCharacterDetail()) so elevation mode can't be
+                                                  // opened. (The elevation readout beside the character name is
+                                                  // shown whenever the elevation is non-zero, regardless of this
+                                                  // setting.)
+                                                  // Same polled-but-ignored pattern as circleEnabled above.
 };
 
 // HP adjustment mode within the detail screen
@@ -109,7 +118,7 @@ struct MovementIndicator {
   bool sending = false;    // a previewMove()/confirmMove() call is in flight
 };
 
-// Circle-mode display state for Display::showCharacterDetail(). A short
+// Circle-mode display state for Display::showCharacterDetail(). A long
 // press of Button B opens radius-editing, handing the encoder over to
 // dialing the radius (see main.cpp's g_circleEditing) without disturbing
 // whichever of HP-edit or move is currently the shared sub-display. Once
@@ -125,6 +134,22 @@ struct CircleIndicator {
   String units;            // best-effort guess at those units (empty if not yet known - see main.cpp)
   bool sending = false;    // a previewCircle() call is in flight
   bool enabled = true;     // mirrors AppSettings::circleEnabled - when false, Display hides the circle-mode ("ring") hint
+};
+
+// Elevation-mode display state for Display::showCharacterDetail(). A short
+// press of Button B opens elevation-editing, handing the encoder over to
+// dialing the active character's token elevation (see main.cpp's
+// g_elevEditing). While it's open the dialed-in value is shown big in the
+// shared sub-display area (same slot circle mode uses); once committed
+// with Button A (or abandoned) it goes away and only the small
+// elevation readout beside the character name remains.
+struct ElevationIndicator {
+  bool enabled = true;    // mirrors AppSettings::elevationEnabled (editing on/off; the readout itself shows whenever the elevation is non-zero)
+  bool known = false;     // the character has a token with a known elevation (Character::hasElevation)
+  bool active = false;    // true while the encoder is dialing elevation
+  float current = 0;      // the token's saved elevation (what the small readout beside the name shows)
+  float pending = 0;      // the value being dialed - equals `current` until the encoder is turned
+  bool sending = false;   // a setTokenElevation() call is in flight
 };
 
 // Button press classification

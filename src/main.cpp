@@ -80,7 +80,7 @@ static float g_moveDistance = 0;
 static String g_moveUnits;
 static bool g_moveSending = false; // a previewMoveRelative()/confirmMove() call is in flight
 
-// Circle: entered from the detail screen by a short press of Button B,
+// Circle: entered from the detail screen by a long press of Button B,
 // which hands the encoder over to dialing a circle's radius
 // (g_circleEditing) centered on the active character's token, without
 // touching whichever of HP-edit or move is the current sub-display -
@@ -106,6 +106,24 @@ static bool g_circleSending = false;                 // a previewCircle() call i
 static bool g_circleRadiusDirty = false;             // radius changed since the last preview send - see CIRCLE_RADIUS_DEBOUNCE_MS
 static unsigned long g_circleLastRadiusChangeMs = 0;
 
+// Elevation ("height") mode: entered from the detail screen by a short press
+// of Button B (circle mode took over the long press). Like circle mode it
+// hands the encoder over - here to dialing the active character's token
+// elevation - without disturbing whichever of HP-edit or move is the current
+// sub-display. Unlike circle mode, nothing is applied live: the encoder only
+// builds up g_elevDelta (a signed offset from the saved elevation, in steps
+// of ELEVATION_STEP), mirroring how HP editing builds up g_deltaValue, and it
+// is only written to the relay when Button A is short-pressed (see
+// sendElevation()). A long press of Button A, or a short press of Button B,
+// abandons the pending change and leaves elevation mode (see
+// cancelElevationEditing()). Gated on AppSettings::elevationEnabled
+// ("Height Mode" on the settings screen).
+static bool g_elevEditing = false;  // encoder is currently dialing elevation
+static float g_elevDelta = 0;       // pending offset from g_activeChar.elevation, in scene distance units
+static bool g_elevHoldActive = false;       // an elevation was just sent: background refreshes must not overwrite it yet - see ELEVATION_REFRESH_HOLD_MS
+static unsigned long g_elevHoldStartMs = 0; // millis() when that hold began
+static bool g_elevSending = false;  // a setTokenElevation() call is in flight
+
 // ===========================================================================
 // Helpers
 // ===========================================================================
@@ -127,6 +145,7 @@ static unsigned long g_circleLastRadiusChangeMs = 0;
 // confirmMoveAndReturn(), both of which now call it directly on their
 // no-op/zero-change early-return paths.
 static CircleIndicator currentCircleIndicator();
+static ElevationIndicator currentElevationIndicator();
 static MovementIndicator currentMoveIndicator();
 static void sendCirclePreview();
 static void redrawDetailScreen();
@@ -293,6 +312,21 @@ static String settingValueCircleEnabled(const AppSettings &s)
   return s.circleEnabled ? "On" : "Off";
 }
 
+static void settingApplyElevationEnabled(AppSettings &s, int32_t delta)
+{
+  // Only two states - any turn just flips it, regardless of direction or
+  // magnitude.
+  if (delta != 0)
+  {
+    s.elevationEnabled = !s.elevationEnabled;
+  }
+}
+
+static String settingValueElevationEnabled(const AppSettings &s)
+{
+  return s.elevationEnabled ? "On" : "Off";
+}
+
 static void settingApplySwapButtons(AppSettings &s, int32_t delta)
 {
   // Only two states - any turn just flips it, regardless of direction or
@@ -359,6 +393,7 @@ static const SettingDescriptor SETTINGS_TABLE[] = {
     {"Table Orientation", settingApplyTableOrientation, settingValueTableOrientation},
     {"Move Buttons", settingApplyMoveButtons, settingValueMoveButtons},
     {"Circle Feature", settingApplyCircleEnabled, settingValueCircleEnabled},
+    {"Height Mode", settingApplyElevationEnabled, settingValueElevationEnabled},
     {"Swap X/O", settingApplySwapButtons, settingValueSwapButtons},
     {"HP gauge style", settingApplyGaugeStyle, settingValueGaugeStyle},
     // Debug / test
@@ -647,8 +682,13 @@ static void enterDetailForSelected()
   g_circleDrawn = false;   // this character's own circle (if any) is left alone server-side - it persists on the map,
                            // this just stops the *new* character's screen from claiming one it doesn't have
   g_circleSending = false; // (g_circleRadius intentionally not reset here - it's meant to carry over between characters)
+  g_elevEditing = false;   // defensive reset - same reasoning as move/circle above
+  g_elevDelta = 0;
+  g_elevHoldActive = false;
+  g_elevSending = false;
   g_state = AppState::CHARACTER_DETAIL;
-  Display::showCharacterDetail(g_activeChar, g_addTarget, g_activeChar.hp, g_activeChar.tempHp, g_deltaValue, false, false);
+  Display::showCharacterDetail(g_activeChar, g_addTarget, g_activeChar.hp, g_activeChar.tempHp, g_deltaValue, false, false,
+                               MovementIndicator(), CircleIndicator(), currentElevationIndicator());
 }
 
 // Applies g_deltaValue on top of g_activeChar's saved hp/tempHp, following
@@ -1410,7 +1450,7 @@ static void sendCurrentHp()
 
   g_sending = true;
   Display::showCharacterDetail(g_activeChar, g_addTarget, pendingHp, pendingTempHp, g_deltaValue, true, false,
-                               currentMoveIndicator(), currentCircleIndicator());
+                               currentMoveIndicator(), currentCircleIndicator(), currentElevationIndicator());
 
   bool ok = RelayClient::updateCharacterHp(g_activeChar.uuid, pendingHp, pendingTempHp);
 
@@ -1447,7 +1487,7 @@ static void sendCurrentHp()
     return;
   }
   Display::showCharacterDetail(g_activeChar, g_addTarget, pendingHp, pendingTempHp, g_deltaValue, false, g_justSent,
-                               currentMoveIndicator(), currentCircleIndicator());
+                               currentMoveIndicator(), currentCircleIndicator(), currentElevationIndicator());
 }
 
 // Resets move-mode state and returns to normal HP editing. If
@@ -1496,7 +1536,7 @@ static MovementIndicator currentMoveIndicator()
 static void sendMovePreview()
 {
   g_moveSending = true;
-  Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false, currentMoveIndicator(), currentCircleIndicator());
+  Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false, currentMoveIndicator(), currentCircleIndicator(), currentElevationIndicator());
 
   // g_moveDCol/g_moveDRow are the raw, unrotated running total in screen
   // terms (what the joystick actually accumulated, and what's shown on
@@ -1523,7 +1563,7 @@ static void sendMovePreview()
 
   g_moveDistance = result.distance;
   g_moveUnits = result.units;
-  Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false, currentMoveIndicator(), currentCircleIndicator());
+  Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false, currentMoveIndicator(), currentCircleIndicator(), currentElevationIndicator());
 }
 
 // First direction press on the detail screen starts a pending move; every
@@ -1558,7 +1598,7 @@ static void nudgeMove(int dCol, int dRow)
     // on a move screen reading "0 ft" with no arrow.
     exitMoveMode(true);
     g_lastModified = DetailSubDisplay::HP;
-    Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false, currentMoveIndicator(), currentCircleIndicator());
+    Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false, currentMoveIndicator(), currentCircleIndicator(), currentElevationIndicator());
 
     if (g_circleDrawn && g_state == AppState::CHARACTER_DETAIL)
     {
@@ -1602,7 +1642,7 @@ static void confirmMoveAndReturn()
 
   g_moveSending = true;
   Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, false,
-                               currentMoveIndicator(), currentCircleIndicator());
+                               currentMoveIndicator(), currentCircleIndicator(), currentElevationIndicator());
 
   RelayClient::MoveResult result;
   bool ok = RelayClient::confirmMove(g_activeChar.uuid, result);
@@ -1624,7 +1664,7 @@ static void confirmMoveAndReturn()
   g_justSent = true;
   g_sentBannerUntil = millis() + 1200;
   Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(), g_deltaValue, false, true,
-                               currentMoveIndicator(), currentCircleIndicator());
+                               currentMoveIndicator(), currentCircleIndicator(), currentElevationIndicator());
 }
 
 static CircleIndicator currentCircleIndicator()
@@ -1640,6 +1680,18 @@ static CircleIndicator currentCircleIndicator()
   return ci;
 }
 
+static ElevationIndicator currentElevationIndicator()
+{
+  ElevationIndicator ei;
+  ei.enabled = g_settings.elevationEnabled;
+  ei.known = g_activeChar.hasElevation;
+  ei.active = g_elevEditing;
+  ei.current = g_activeChar.elevation;
+  ei.pending = g_activeChar.elevation + g_elevDelta;
+  ei.sending = g_elevSending;
+  return ei;
+}
+
 // Redraws the detail screen reflecting current state - whichever of
 // HP-edit/move is the shared sub-display (g_lastModified) plus whatever
 // circle state applies (editing/drawn) - so callers that just changed one
@@ -1647,7 +1699,7 @@ static CircleIndicator currentCircleIndicator()
 static void redrawDetailScreen()
 {
   Display::showCharacterDetail(g_activeChar, g_addTarget, currentDisplayHp(), currentDisplayTempHp(),
-                               g_deltaValue, false, g_justSent, currentMoveIndicator(), currentCircleIndicator());
+                               g_deltaValue, false, g_justSent, currentMoveIndicator(), currentCircleIndicator(), currentElevationIndicator());
 }
 
 // Mirrors g_circleRadius into g_settings and writes settings.cfg, but only
@@ -1701,22 +1753,29 @@ static void sendCirclePreview()
   redrawDetailScreen();
 }
 
-// Short press of Button B. Outside radius-editing, this is what opens it:
-// hands the encoder over to the circle radius, without disturbing
-// whichever of HP-edit/move is the current shared sub-display, and
-// immediately previews at whatever radius is already dialed in (carried
-// over from last time) rather than waiting for the first encoder turn.
-// Once radius-editing is already open, a second short press instead
-// removes whatever circle is currently drawn (cancelling the live
-// preview) leaves radius-editing - the current
-// radius is remembered (see persistCircleRadius()).
+// Opens radius-editing - a LONG press of Button B outside any editing mode
+// (see handleCharacterDetail(); the short press now opens elevation mode).
+// Hands the encoder over to the circle radius, without disturbing whichever
+// of HP-edit/move is the current shared sub-display, and immediately
+// previews at whatever radius is already dialed in (carried over from last
+// time) rather than waiting for the first encoder turn.
+//
+// Once radius-editing is open, a short press of Button B (or A) -
+// circleButtonShortPress() below - instead removes whatever circle is
+// currently drawn (cancelling the live preview) and leaves radius-editing;
+// the current radius is remembered (see persistCircleRadius()).
+static void openCircleEditing()
+{
+  g_circleEditing = true;
+  g_circleRadiusDirty = false;
+  sendCirclePreview();
+}
+
 static void circleButtonShortPress()
 {
   if (!g_circleEditing)
   {
-    g_circleEditing = true;
-    g_circleRadiusDirty = false;
-    sendCirclePreview();
+    openCircleEditing();
     return;
   }
 
@@ -1741,6 +1800,105 @@ static void circleButtonLongPress()
   g_circleEditing = false;
   g_circleRadiusDirty = false;
   persistCircleRadius();
+  redrawDetailScreen();
+}
+
+// Opens elevation-editing (short press of Button B outside any other
+// editing mode): hands the encoder over to g_elevDelta. Refuses quietly
+// (or with an error screen in Debug Mode) when the character has no token
+// to take an elevation from.
+static void openElevationEditing()
+{
+  if (!g_activeChar.hasElevation)
+  {
+    goToError("no token on any scene for this character", AppState::CHARACTER_DETAIL);
+    return;
+  }
+  g_elevEditing = true;
+  g_elevDelta = 0;
+  g_justSent = false;
+  redrawDetailScreen();
+}
+
+// Abandons whatever elevation change was dialed in and hands the encoder
+// back to HP-edit. Nothing was ever sent, so there's nothing to undo on the
+// relay.
+static void cancelElevationEditing()
+{
+  g_elevEditing = false;
+  g_elevDelta = 0;
+  redrawDetailScreen();
+}
+
+// Writes the dialed-in elevation to the relay (Button A short press while
+// elevation-editing). With nothing dialed in it just leaves elevation mode
+// without a network round trip, same idea as sendCurrentHp()'s no-op path.
+//
+// The new elevation is applied locally and drawn *before* the (blocking,
+// network round-trip) relay call, so the number on screen changes the
+// instant Button A is pressed instead of after the relay has answered -
+// the "Sending..." status stays up until it does. If the call fails, the
+// previous elevation is put back and elevation mode is reopened with the
+// same change still dialed in, so it can be retried, mirroring how a
+// failed HP update behaves. If the relay reports a different final value
+// than was requested (e.g. something clamped it), the display corrects to
+// that once the answer arrives.
+static void setActiveElevation(float value)
+{
+  g_activeChar.elevation = value;
+  g_activeChar.hasElevation = true;
+  // Reflect the change in the cached list too, same as sendCurrentHp().
+  if (g_selectedIndex >= 0 && g_selectedIndex < (int)g_characters.size())
+  {
+    g_characters[g_selectedIndex].elevation = value;
+    g_characters[g_selectedIndex].hasElevation = true;
+  }
+}
+
+static void sendElevation()
+{
+  if (g_elevDelta == 0)
+  {
+    g_elevEditing = false;
+    redrawDetailScreen();
+    return;
+  }
+
+  const float previous = g_activeChar.elevation;
+  const float target = previous + g_elevDelta;
+
+  // Optimistic update: show the new value right now.
+  setActiveElevation(target);
+  g_elevDelta = 0;
+  g_elevEditing = false;
+  g_elevSending = true;
+  g_justSent = false;
+  redrawDetailScreen();
+
+  float confirmed = target;
+  bool ok = RelayClient::setTokenElevation(g_activeChar.uuid, target, &confirmed);
+
+  g_elevSending = false;
+
+  if (!ok)
+  {
+    // Roll back and reopen elevation mode with the same change dialed in.
+    setActiveElevation(previous);
+    g_elevDelta = target - previous;
+    g_elevEditing = true;
+    goToError("elevation failed: " + RelayClient::lastError(), AppState::CHARACTER_DETAIL);
+    return;
+  }
+
+  if (confirmed != target)
+    setActiveElevation(confirmed);
+  // Keep showing this value for a while rather than letting the next
+  // background refresh replace it - Foundry builds the change up gradually,
+  // so a refresh right now could read an intermediate step.
+  g_elevHoldActive = true;
+  g_elevHoldStartMs = millis();
+  g_justSent = true;
+  g_sentBannerUntil = millis() + 1200;
   redrawDetailScreen();
 }
 
@@ -1772,18 +1930,24 @@ static void handleCharacterDetail()
   bool joyLeftRepeat = InputManager::pollJoyLeftRepeat();
   bool joyRightRepeat = InputManager::pollJoyRightRepeat();
 
-  // Button B is global and independent of HP-edit/move. Outside
-  // radius-editing, a short press opens it. Once it's open: a short press
-  // instead removes whatever circle is currently drawn but stays in
-  // radius-editing (see circleButtonShortPress()), while a long press
-  // exits radius-editing but leaves the circle exactly as drawn (see
-  // circleButtonLongPress()). Checked first so neither can also fall
-  // through and register as anything else below in the same tick.
-  //
-  // Gated on g_settings.circleEnabled ("Circle Feature" on the settings
-  // screen) - Button B is still polled every loop above regardless, but
-  // its presses are dropped here when the setting is off.
-  if (g_settings.circleEnabled)
+  // Button B is global and independent of HP-edit/move, and its meaning
+  // depends on which editing mode (if any) is open:
+  //   - no mode open: a LONG press opens circle radius-editing (gated on
+  //     "Circle Feature"), a SHORT press opens elevation-editing (gated on
+  //     "Height Mode") - see openCircleEditing()/openElevationEditing().
+  //   - radius-editing open: a short press removes whatever circle is
+  //     currently drawn and leaves radius-editing (circleButtonShortPress()),
+  //     while a long press leaves radius-editing but keeps the circle
+  //     exactly as drawn (circleButtonLongPress()).
+  //   - elevation-editing open: a short press abandons the pending change and
+  //     leaves elevation-editing (cancelElevationEditing()); a long press does
+  //     nothing, so a stray long press can't drop you into circle mode with
+  //     an elevation change still pending.
+  // Checked first so none of these can also fall through and register as
+  // anything else below in the same tick. Button B is still polled every
+  // loop above regardless of the two feature settings - the presses are just
+  // dropped here when the matching setting is off.
+  if (g_circleEditing)
   {
     if (b == ButtonEvent::LONG_PRESS)
     {
@@ -1793,6 +1957,27 @@ static void handleCharacterDetail()
     if (b == ButtonEvent::SHORT_PRESS)
     {
       circleButtonShortPress();
+      return;
+    }
+  }
+  else if (g_elevEditing)
+  {
+    if (b == ButtonEvent::SHORT_PRESS)
+    {
+      cancelElevationEditing();
+      return;
+    }
+  }
+  else
+  {
+    if (b == ButtonEvent::LONG_PRESS && g_settings.circleEnabled)
+    {
+      openCircleEditing();
+      return;
+    }
+    if (b == ButtonEvent::SHORT_PRESS && g_settings.elevationEnabled)
+    {
+      openElevationEditing();
       return;
     }
   }
@@ -1872,6 +2057,57 @@ static void handleCharacterDetail()
     circleButtonShortPress();
     return;
   }
+  }
+  else if (g_elevEditing)
+  {
+    // Encoder dials the pending elevation (see g_elevEditing's comment).
+    // Bounded by ELEVATION_MIN/MAX, widened if the token is already outside
+    // them so a turn never snaps it somewhere surprising.
+    int32_t elevTurn = InputManager::readEncoderDelta();
+    if (elevTurn != 0)
+    {
+      float lo = min((float)ELEVATION_MIN, g_activeChar.elevation);
+      float hi = max((float)ELEVATION_MAX, g_activeChar.elevation);
+      float target = g_activeChar.elevation + g_elevDelta;
+
+      // Each detent moves to the next multiple of ELEVATION_STEP in the
+      // direction of the turn, so a value that isn't on the grid yet (e.g. a
+      // token sitting at 7) snaps onto it with the first detent (7 -> 10 up,
+      // 7 -> 5 down) instead of just shifting by the step (12/2). The small
+      // epsilon keeps a value that already sits exactly on a multiple from
+      // being treated as just below/above it by float rounding.
+      const float step = (float)ELEVATION_STEP;
+      const float eps = 0.0001f;
+      for (int32_t i = 0; i < abs(elevTurn); i++)
+      {
+        if (elevTurn > 0)
+          target = (floorf(target / step + eps) + 1.0f) * step;
+        else
+          target = (ceilf(target / step - eps) - 1.0f) * step;
+      }
+
+      if (target < lo)
+        target = lo;
+      if (target > hi)
+        target = hi;
+      g_elevDelta = target - g_activeChar.elevation;
+      g_justSent = false;
+      redrawDetailScreen(); // updates the big readout and the small one beside the name as it changes
+    }
+
+    // Button A: short press sends, long press abandons. A double press
+    // falls through to the shared handler below, which also leaves
+    // elevation mode.
+    if (a == ButtonEvent::SHORT_PRESS)
+    {
+      sendElevation();
+      return;
+    }
+    if (a == ButtonEvent::LONG_PRESS)
+    {
+      cancelElevationEditing();
+      return;
+    }
   }
   else
   {
@@ -2047,6 +2283,8 @@ static void handleCharacterDetail()
     // switches the shared sub-display to HP even if move was showing,
     // without cancelling either of them.
     g_circleEditing = false;
+    g_elevEditing = false; // same for elevation-editing - and any change dialed in but not sent is dropped
+    g_elevDelta = 0;
     g_lastModified = DetailSubDisplay::HP;
     redrawDetailScreen();
     return;
@@ -2065,6 +2303,20 @@ static void handleCharacterDetail()
       g_activeChar.maxHp = fresh.maxHp;
       g_activeChar.tempHp = fresh.tempHp;
       g_activeChar.hp = fresh.hp;
+      // Leave elevation alone while it's being edited - the pending change
+      // is an offset from the saved value, so refreshing the base out from
+      // under it would make the dialed-in number jump.
+      // Also leave it alone for ELEVATION_REFRESH_HOLD_MS after sending one
+      // (g_elevHoldActive), so a refresh landing mid-animation in Foundry
+      // can't show an intermediate value. (Elapsed-time compare rather than
+      // an absolute deadline so millis() wrapping can't wedge it.)
+      if (g_elevHoldActive && millis() - g_elevHoldStartMs >= ELEVATION_REFRESH_HOLD_MS)
+        g_elevHoldActive = false;
+      if (!g_elevEditing && !g_elevHoldActive)
+      {
+        g_activeChar.elevation = fresh.elevation;
+        g_activeChar.hasElevation = fresh.hasElevation;
+      }
       redrawDetailScreen();
     }
   }

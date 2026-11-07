@@ -79,6 +79,13 @@ namespace RelayClient {
   // there was actually a pending target to discard.
   bool cancelMove(const String &uuid, bool *outCleared = nullptr);
 
+  // Sets the elevation of a character's token (absolute value, in the
+  // scene's own distance units - feet/meters/etc). outElevation (if
+  // provided) receives the elevation the relay reports afterwards, which is
+  // what the token really ended up at. Anything else that adjusts elevation
+  // (e.g. a Scene Region behavior) may still override it later, as usual.
+  bool setTokenElevation(const String &uuid, float elevation, float *outElevation = nullptr);
+
   // Drops a circular map template centered on a character's token. radius
   // is in the scene's own distance units (0 = relay's default, one grid
   // square). color is a CSS hex string like "#ff0000" (empty = relay's

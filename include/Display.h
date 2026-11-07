@@ -73,6 +73,7 @@ namespace Display {
 void showCharacterDetail(const Character &c, HpAddTarget addTarget, int pendingHp, int pendingTempHp,
                           int pendingDelta, bool sending, bool justSent,
                           const MovementIndicator &move = MovementIndicator(),
-                          const CircleIndicator &circle = CircleIndicator());
+                          const CircleIndicator &circle = CircleIndicator(),
+                          const ElevationIndicator &elev = ElevationIndicator());
 
 }
