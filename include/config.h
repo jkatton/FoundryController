@@ -3,7 +3,7 @@
 // Firmware version, shown on the Firmware Update (receive) screen and the
 // Send Firmware screens so you can tell units apart and confirm an update
 // took. Bump this by hand whenever you make a build you intend to distribute.
-#define FIRMWARE_VERSION "1.0.1"
+#define FIRMWARE_VERSION "1.1.0"
 
 // =====================================================================
 // PIN CONFIGURATION - Wemos D1 Mini (ESP8266)
