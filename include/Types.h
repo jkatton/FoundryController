@@ -116,6 +116,7 @@ struct MovementIndicator {
   float distance = 0;      // distance to the accumulated target, as last reported by the relay
   String units;            // scene distance units for `distance`, e.g. "ft" (empty if not yet known)
   bool sending = false;    // a previewMove()/confirmMove() call is in flight
+  bool pending = false;    // a move is pending (preview showing on the map) even if `active` is false because HP editing is the shown sub-display - lets the HP screen's hint know a long press of Button A won't leave for the character list
 };
 
 // Circle-mode display state for Display::showCharacterDetail(). A long

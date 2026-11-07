@@ -345,6 +345,8 @@ static int ringHoleHalfWidth(int absDy)
   // The pictogram for a press type, centered on (cx, cy).
   static void drawButtonIcon(int cx, int cy, char label, HintPress press, uint16_t color)
   {
+    cy -= 1; // nudge every button pictogram up one pixel so it sits visually centered with the text beside it
+
     if (press == HINT_DOUBLE)
     {
       drawButtonIconOne(cx - 6, cy, label, color);
@@ -475,7 +477,10 @@ static int ringHoleHalfWidth(int absDy)
         cur += HINT_ICON_PAD;
         if (draw)
           drawButtonIcon(cur + w / 2, y, label, press, color);
-        cur += w + HINT_ICON_PAD;
+        cur += w;
+        // No gap between a pictogram and the ":command" that follows it.
+        if (!(i + len < n && s[i + len] == ':'))
+          cur += HINT_ICON_PAD;
         i += len;
       }
       else
@@ -898,8 +903,8 @@ static int ringHoleHalfWidth(int absDy)
     tft.setTextSize(1);
     tft.setTextColor(COL_DIM, COL_BG);
     tft.setTextDatum(MC_DATUM);
-    drawHint(shortLabel(labelA()) + ": select", SCREEN_CX, 200, COL_DIM);
-    drawHint(longLabel(labelB()) + ": IP input", SCREEN_CX, 215, COL_DIM);
+    drawHint(shortLabel(labelA()) + ":select", SCREEN_CX, 200, COL_DIM);
+    drawHint(longLabel(labelB()) + ":IP input", SCREEN_CX, 215, COL_DIM);
 
     s_listValid = true;
     s_lastListChars = chars;
@@ -1978,8 +1983,8 @@ static int ringHoleHalfWidth(int absDy)
       // No "Updating..." status while the radius preview is in flight - it
       // only flashed for a moment on every radius change, so the hint row
       // just stays put (circle.sending is still set by main.cpp, but unused here).
-      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + "/" + shortLabel(labelB()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
-      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, longLabel(labelA()) + "/" + longLabel(labelB()) + ":draw", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, longLabel(labelA()) + "/" + longLabel(labelB()) + ":draw", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, shortLabel(labelA()) + "/" + shortLabel(labelB()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
       return;
     }
 
@@ -2000,8 +2005,8 @@ static int ringHoleHalfWidth(int absDy)
       }
       else
       {
-        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + ":set " + longLabel(labelA()) + ":cancel", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
-        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, shortLabel(labelB()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + "/" + shortLabel(labelB()) + ":set", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
+        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, longLabel(labelA()) + "/" + longLabel(labelB()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
       }
       return;
     }
@@ -2023,11 +2028,8 @@ static int ringHoleHalfWidth(int absDy)
 
       // No "Moving..." status while a preview is in flight - same reasoning
       // as the circle branch above; the hint row just stays put.
-      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + ":move " + longLabel(labelA()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
-      // Second hint row intentionally left blank in move mode: the Button B
-      // ":elev" / ":ring" hints that used to live here were removed to keep
-      // this screen uncluttered.
-      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, String(""), 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + ":move", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, longLabel(labelA()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
       return;
     }
 
@@ -2081,20 +2083,33 @@ static int ringHoleHalfWidth(int absDy)
     }
     else
     {
-      // Only offer "send HP" while there's actually an HP (or temp HP) change
-      // queued to send; otherwise just the way back.
+      // Row 1: "send HP" (only while an HP/temp HP change is queued) plus the
+      // regular/temp toggle hint. Row 2 is always the way back. The toggle
+      // reads "temp hp"/"reg hp" when it fits beside "send HP", otherwise
+      // just "temp"/"reg". (Measured at text size 1, the size these rows use,
+      // against the width of the ring's empty hole just below the row's text.)
       const bool hpChangeQueued = (pendingHp != c.hp) || (pendingTempHp != c.tempHp);
-      String hpHint = hpChangeQueued ? (shortLabel(labelA()) + ":send HP " + longLabel(labelA()) + ":back")
-                                     : (longLabel(labelA()) + ":back");
-      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, hpHint, 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
-      if (addTarget == HpAddTarget::TEMP)
+      const bool toTemp = (addTarget != HpAddTarget::TEMP);
+      const String sendHint = shortLabel(labelA()) + ":send HP ";
+      const String toggleFull = doubleLabel(labelA()) + (toTemp ? ":temp hp" : ":reg hp");
+      const String toggleShort = doubleLabel(labelA()) + (toTemp ? ":temp" : ":reg");
+      String row1;
+      if (hpChangeQueued)
       {
-        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, doubleLabel(labelA()) + ":reg hp", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+        tft.setTextSize(1);
+        const int safeWidth = 2 * ringHoleHalfWidth(65 + 8) - 4;
+        row1 = (hintWidth(sendHint + toggleFull) <= safeWidth) ? (sendHint + toggleFull) : (sendHint + toggleShort);
       }
       else
       {
-        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, doubleLabel(labelA()) + ":temp hp", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+        row1 = toggleFull;
       }
+      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, row1, 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
+      // With nothing pending (no queued HP change, no background move), a long
+      // press of Button A leaves for the character list rather than just
+      // backing out of an edit, so say so.
+      const bool nothingPending = !hpChangeQueued && !move.pending;
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, longLabel(labelA()) + (nothingPending ? ":char list" : ":back"), 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
     }
   }
 

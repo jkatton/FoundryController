@@ -688,7 +688,7 @@ static void enterDetailForSelected()
   g_elevSending = false;
   g_state = AppState::CHARACTER_DETAIL;
   Display::showCharacterDetail(g_activeChar, g_addTarget, g_activeChar.hp, g_activeChar.tempHp, g_deltaValue, false, false,
-                               MovementIndicator(), CircleIndicator(), currentElevationIndicator());
+                               MovementIndicator(), currentCircleIndicator(), currentElevationIndicator());
 }
 
 // Applies g_deltaValue on top of g_activeChar's saved hp/tempHp, following
@@ -1541,6 +1541,7 @@ static MovementIndicator currentMoveIndicator()
   m.distance = g_moveDistance;
   m.units = g_moveUnits;
   m.sending = g_moveSending;
+  m.pending = g_moveMode;
   return m;
 }
 
@@ -1977,7 +1978,13 @@ static void handleCharacterDetail()
   }
   else if (g_elevEditing)
   {
+    // Button B mirrors Button A here: short press sets, long press goes back.
     if (b == ButtonEvent::SHORT_PRESS)
+    {
+      sendElevation();
+      return;
+    }
+    if (b == ButtonEvent::LONG_PRESS)
     {
       cancelElevationEditing();
       return;
