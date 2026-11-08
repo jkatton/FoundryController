@@ -698,6 +698,47 @@ static int ringHoleHalfWidth(int absDy)
     drawHint(longLabel(labelB()) + ":back", SCREEN_CX, 215, COL_DIM);
   }
 
+  void showEspNowMenu(const std::vector<String> &options, int selectedIndex)
+  {
+    s_listValid = false;
+    s_lastListSelectedIndex = -1;
+    s_lastDetailUuid = "";
+
+    tft.fillScreen(COL_BG);
+    centeredText(tft, "ESP-NOW Firmware", 30, 1, COL_ACCENT);
+    centeredText(tft, String("v") + FIRMWARE_VERSION, 44, 1, COL_DIM);
+
+    int n = options.size();
+    if (n > 0)
+    {
+      if (selectedIndex < 0)
+        selectedIndex = 0;
+      if (selectedIndex >= n)
+        selectedIndex = n - 1;
+
+      const int rowH = 40;
+      const int centerY = 110;
+      for (int offset = -1; offset <= 1; offset++)
+      {
+        int idx = selectedIndex + offset;
+        if (idx < 0 || idx >= n)
+          continue;
+        bool isSel = (offset == 0);
+        int y = centerY + offset * rowH;
+        tft.setTextDatum(MC_DATUM);
+        tft.setTextSize((isSel && options[idx].length() <= 16) ? 2 : 1);
+        tft.setTextColor(isSel ? COL_ACCENT : COL_DIM, COL_BG);
+        tft.drawString(options[idx], SCREEN_CX, y);
+      }
+    }
+
+    tft.setTextSize(1);
+    tft.setTextColor(COL_DIM, COL_BG);
+    tft.setTextDatum(MC_DATUM);
+    drawHint(shortLabel(labelA()) + ":next " + shortLabel(labelB()) + ":select", SCREEN_CX, 200, COL_DIM);
+    drawHint(longLabel(labelB()) + ":exit", SCREEN_CX, 215, COL_DIM);
+  }
+
   void showSettings(const std::vector<String> &names, const std::vector<String> &values, int selectedIndex)
   {
     s_listValid = false;

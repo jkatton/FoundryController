@@ -33,6 +33,10 @@ enum class AppState {
   OTA_SEND,                 // picking a target IP and pushing this unit's own firmware to another
                              // unit that's sitting on its OTA_UPDATE screen, reached from the
                              // "Send Firmware" row of the settings carousel
+  ESPNOW_MENU,              // boot-time-only mode (power on with both buttons held): pick Send or
+                             // Receive firmware over ESP-NOW. No WiFi/relay is ever started in this mode.
+  ESPNOW_RECEIVE,           // result screen after a (blocking) ESP-NOW receive attempt - see EspNowOta
+  ESPNOW_SEND,              // result screen after a (blocking) ESP-NOW send attempt
   ERROR_SCREEN
 };
 

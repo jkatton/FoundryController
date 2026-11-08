@@ -13,6 +13,7 @@
 #include "Storage.h"
 #include "RelayClient.h"
 #include "Display.h"
+#include "EspNowOta.h"
 
 // ===========================================================================
 // Application state
@@ -2375,6 +2376,224 @@ static void handleErrorScreen()
 }
 
 // ===========================================================================
+// ESP-NOW firmware transfer mode
+// ===========================================================================
+// Entered only at boot, by powering the unit on with BOTH buttons held (see
+// setup()). In this mode WiFi/relay are never started: the radio is used for
+// ESP-NOW alone, so two units can swap firmware with no router at all. The
+// menu picks Receive or Send; the transfers themselves live in EspNowOta.cpp
+// and block until they finish, fail, or a long press of either button
+// cancels. A long press of Button B on the menu reboots into normal mode.
+static int g_espNowIndex = 0;
+static bool g_espNowIsSend = false;
+static unsigned long g_espNowResultMs = 0;
+
+static const char *espNowTitle()
+{
+  return g_espNowIsSend ? "ESP-NOW Send" : "ESP-NOW Receive";
+}
+
+static void espNowStatusCb(const String &line1, const String &line2, const String &footer)
+{
+  Display::showOtaStatus(line1, line2, espNowTitle(), footer);
+}
+
+static void espNowProgressCb(int percent)
+{
+  Display::showOtaProgress(percent);
+}
+
+// Short presses seen while polling for cancel are remembered here so the
+// version-check prompt can read them (each press event is only reported once).
+static bool g_espNowYes = false; // role-B short press: install anyway
+static bool g_espNowNo = false;  // role-A short press: refuse
+
+static bool espNowCancelCb()
+{
+  // Polled both ways every call so each button's debounce state stays current.
+  ButtonEvent a = InputManager::pollButtonA();
+  ButtonEvent b = InputManager::pollButtonB();
+  if (b == ButtonEvent::SHORT_PRESS)
+    g_espNowYes = true;
+  if (a == ButtonEvent::SHORT_PRESS)
+    g_espNowNo = true;
+  return a == ButtonEvent::LONG_PRESS || b == ButtonEvent::LONG_PRESS;
+}
+
+// Receiver only: incoming firmware isn't newer than what's running.
+static void espNowPromptCb(const String &line1, const String &line2)
+{
+  g_espNowYes = g_espNowNo = false;
+  String footer = String(InputManager::buttonsSwapped() ? BUTTON_A_LABEL : BUTTON_B_LABEL) + ":install  " +
+                  String(InputManager::buttonsSwapped() ? BUTTON_B_LABEL : BUTTON_A_LABEL) + ":refuse";
+  Display::showOtaStatus(line1, line2, espNowTitle(), footer);
+}
+
+static int espNowConfirmCb()
+{
+  if (g_espNowYes)
+  {
+    g_espNowYes = false;
+    return 1;
+  }
+  if (g_espNowNo)
+  {
+    g_espNowNo = false;
+    return -1;
+  }
+  return 0;
+}
+
+static void renderEspNowMenu()
+{
+  std::vector<String> options;
+  options.push_back("Receive Firmware");
+  options.push_back("Send Firmware");
+  Display::showEspNowMenu(options, g_espNowIndex);
+}
+
+// True once both buttons have been seen closed together, continuously for
+// ESPNOW_BOOT_HOLD_MS, at some point within windowMs. Takes the place of the
+// fixed boot delay, so a normal boot is no slower than before.
+static bool bootChordHeld(unsigned long windowMs)
+{
+  unsigned long start = millis();
+  unsigned long heldSince = 0;
+  while (millis() - start < windowMs)
+  {
+    if (InputManager::bothButtonsHeld())
+    {
+      if (heldSince == 0)
+        heldSince = millis();
+      else if (millis() - heldSince >= ESPNOW_BOOT_HOLD_MS)
+        return true;
+    }
+    else
+    {
+      heldSince = 0;
+    }
+    delay(5);
+  }
+  return false;
+}
+
+static void enterEspNowMode()
+{
+  g_espNowIsSend = false;
+  Display::showOtaStatus("ESP-NOW mode", "Release the buttons", "ESP-NOW Firmware", "");
+
+  // The buttons are still down; the menu must not see that as a press. Wait
+  // for release (bounded, in case one is stuck), then drop anything queued.
+  unsigned long t0 = millis();
+  while (InputManager::anyButtonHeld() && millis() - t0 < 5000)
+    delay(10);
+  InputManager::readEncoderDelta();
+
+  g_espNowIndex = 0;
+  g_state = AppState::ESPNOW_MENU;
+  renderEspNowMenu();
+}
+
+static void runEspNowTransfer(bool send)
+{
+  g_espNowIsSend = send;
+  g_state = send ? AppState::ESPNOW_SEND : AppState::ESPNOW_RECEIVE;
+
+  EspNowOta::Callbacks cb;
+  cb.status = espNowStatusCb;
+  cb.progress = espNowProgressCb;
+  cb.cancelled = espNowCancelCb;
+  cb.prompt = espNowPromptCb;
+  cb.confirm = espNowConfirmCb;
+
+  String err;
+  EspNowOta::Result r = send ? EspNowOta::sendFirmware(cb, err) : EspNowOta::receiveFirmware(cb, err);
+
+  if (r == EspNowOta::Result::CANCELLED)
+  {
+    InputManager::readEncoderDelta();
+    g_state = AppState::ESPNOW_MENU;
+    renderEspNowMenu();
+    return;
+  }
+
+  if (r == EspNowOta::Result::SUCCESS && !send)
+  {
+    Display::showOtaStatus("Update complete", "Rebooting...", espNowTitle(), "");
+    delay(1500);
+    ESP.restart();
+    return;
+  }
+
+  if (r == EspNowOta::Result::SUCCESS)
+    Display::showOtaStatus("Sent!", "Target is rebooting", espNowTitle(), "Press any button");
+  else
+    Display::showOtaStatus("Transfer failed", err, espNowTitle(), "Press any button");
+
+  // Result screen: handleEspNowResult() waits for any input, then returns to the menu.
+  g_espNowResultMs = millis();
+}
+
+static void handleEspNowResult()
+{
+  // Ignore input for the first moment so the long press that may have just
+  // cancelled/ended things can't instantly dismiss the result.
+  InputManager::readEncoderDelta();
+  NavDir nav = pollNavDirection(g_settings.screenRotation);
+  ButtonEvent a = InputManager::pollButtonA();
+  ButtonEvent b = InputManager::pollButtonB();
+  if (millis() - g_espNowResultMs > 800 &&
+      (nav != NavDir::NONE || a != ButtonEvent::NONE || b != ButtonEvent::NONE))
+  {
+    g_state = AppState::ESPNOW_MENU;
+    renderEspNowMenu();
+  }
+}
+
+static void handleEspNowMenu()
+{
+  const int count = 2;
+
+  int32_t delta = InputManager::readEncoderDelta();
+  if (delta != 0)
+  {
+    g_espNowIndex = ((g_espNowIndex + delta) % count + count) % count;
+    renderEspNowMenu();
+  }
+
+  // Joystick: up/down move between the two rows, right selects.
+  NavDir nav = pollNavDirection(g_settings.screenRotation);
+  if (nav == NavDir::UP || nav == NavDir::DOWN)
+  {
+    g_espNowIndex = (g_espNowIndex + (nav == NavDir::DOWN ? 1 : count - 1)) % count;
+    renderEspNowMenu();
+  }
+  else if (nav == NavDir::RIGHT)
+  {
+    runEspNowTransfer(g_espNowIndex == 1);
+    return;
+  }
+
+  ButtonEvent a = InputManager::pollButtonA();
+  if (a == ButtonEvent::SHORT_PRESS)
+  {
+    g_espNowIndex = (g_espNowIndex + 1) % count;
+    renderEspNowMenu();
+  }
+
+  ButtonEvent b = InputManager::pollButtonB();
+  if (b == ButtonEvent::SHORT_PRESS)
+  {
+    runEspNowTransfer(g_espNowIndex == 1);
+    return;
+  }
+  else if (b == ButtonEvent::LONG_PRESS)
+  {
+    ESP.restart(); // back to a normal boot
+  }
+}
+
+// ===========================================================================
 // setup() / loop()
 // ===========================================================================
 
@@ -2403,7 +2622,14 @@ void setup()
   InputManager::begin();
 
   Display::showBoot("Starting WiFi...");
-  delay(1000);
+  // Power on with BOTH buttons held to enter ESP-NOW firmware transfer mode
+  // instead of connecting to WiFi. This window replaces the old fixed 1s
+  // delay, so a normal boot takes the same time as before.
+  if (bootChordHeld(ESPNOW_BOOT_WINDOW_MS))
+  {
+    enterEspNowMode();
+    return;
+  }
   // Tries every saved network first; opens the config portal only if none connect.
   bool wifiOk = connectWifi();
 
@@ -2465,6 +2691,13 @@ void loop()
     break;
   case AppState::OTA_SEND:
     handleSendFirmware();
+    break;
+  case AppState::ESPNOW_MENU:
+    handleEspNowMenu();
+    break;
+  case AppState::ESPNOW_RECEIVE:
+  case AppState::ESPNOW_SEND:
+    handleEspNowResult();
     break;
   case AppState::ERROR_SCREEN:
     handleErrorScreen();

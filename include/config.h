@@ -3,7 +3,7 @@
 // Firmware version, shown on the Firmware Update (receive) screen and the
 // Send Firmware screens so you can tell units apart and confirm an update
 // took. Bump this by hand whenever you make a build you intend to distribute.
-#define FIRMWARE_VERSION "1.2.1"
+#define FIRMWARE_VERSION "1.3.0"
 
 // =====================================================================
 // PIN CONFIGURATION - Wemos D1 Mini (ESP8266)
@@ -240,6 +240,37 @@
 //   reply after the last byte is sent (it verifies the image first).
 #define OTA_SEND_TIMEOUT_MS  8000
 #define OTA_SEND_REPLY_MS    20000
+
+// ESP-NOW firmware transfer mode (entered by powering on with BOTH buttons
+// held - see main.cpp's enterEspNowMode() and EspNowOta.cpp). Unit-to-unit,
+// no router needed.
+// ESPNOW_CHANNEL: both units must use the same one (1-13).
+// ESPNOW_BOOT_WINDOW_MS / ESPNOW_BOOT_HOLD_MS: at boot, both buttons must be
+//   seen closed together (and no joystick direction) continuously for
+//   HOLD_MS at some point inside the WINDOW_MS startup window. The window
+//   replaces the old fixed boot delay, so normal boots take no longer.
+// ESPNOW_CHUNK_BYTES: firmware bytes per packet. Multiple of 4, and
+//   <= 245 (ESP-NOW's 250-byte limit minus the 5-byte header).
+// ESPNOW_ACK_TIMEOUT_MS / ESPNOW_MAX_RETRIES: per-chunk stop-and-wait. The
+//   sender gives up after MAX_RETRIES consecutive unanswered attempts.
+// ESPNOW_RECV_STALL_MS: receiver abandons a transfer after this long with no
+//   packet from the sender (the running firmware is untouched either way).
+// ESPNOW_DISCOVER_TIMEOUT_MS: how long the sender searches for a receiver.
+#define ESPNOW_CHANNEL              1
+#define ESPNOW_BOOT_WINDOW_MS    1000
+#define ESPNOW_BOOT_HOLD_MS       150
+#define ESPNOW_CHUNK_BYTES        200
+#define ESPNOW_ACK_TIMEOUT_MS      40
+#define ESPNOW_MAX_RETRIES         50
+#define ESPNOW_RECV_STALL_MS     5000
+#define ESPNOW_DISCOVER_TIMEOUT_MS 60000
+// Version check: when the incoming firmware is NOT newer than what the
+// receiver is running, the receiver's user must confirm.
+// ESPNOW_CONFIRM_TIMEOUT_MS: how long the sender waits for that decision.
+// ESPNOW_PENDING_STALE_MS: receiver drops a pending prompt if the sender
+//   stops asking (it re-sends its request every ~0.5s while waiting).
+#define ESPNOW_CONFIRM_TIMEOUT_MS 60000
+#define ESPNOW_PENDING_STALE_MS    4000
 
 // LittleFS path used to remember the relay address across reboots
 #define RELAY_CONFIG_PATH "/relay.cfg"

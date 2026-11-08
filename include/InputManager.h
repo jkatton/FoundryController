@@ -58,6 +58,17 @@ int32_t readEncoderDelta(EncoderProfile profile = EncoderProfile::NORMAL);
   ButtonEvent pollButtonA(); // RKJXT1F42001 center push (PCF8575 P0)
   ButtonEvent pollButtonB(); // standalone second button (PCF8575 P5)
 
+  // Instantaneous raw state of the two physical buttons, for the boot-time
+  // "both buttons held" check (see main.cpp's bootChordHeld()). These do NOT
+  // go through the debounce/short/long/double-press machine and don't care
+  // about the Swap A/B setting - they look at the physical pins. Both
+  // ignore the tilt switch's center-contact quirk (a closed direction also
+  // closes Button A's pin), so tilting the stick never counts as a push.
+  //   bothButtonsHeld(): both the center push and Button B are closed.
+  //   anyButtonHeld():   either one is closed.
+  bool bothButtonsHeld();
+  bool anyButtonHeld();
+
   // RKJXT1F42001 4-direction tilt switch (PCF8575 P1-P4). Unlike the
   // buttons above, directions are always instant, single-shot presses -
   // there's no long-press or double-press meaning for a direction, so

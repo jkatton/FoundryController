@@ -469,6 +469,24 @@ namespace InputManager
     return s_buttonsSwapped ? pollButton(s_btnA, anyDirectionRawPressed()) : pollButton(s_btnB);
   }
 
+  // Raw physical-pin checks (see InputManager.h). Each call uses the shared
+  // once-per-millisecond expander snapshot, so it's cheap to poll in a loop.
+  bool bothButtonsHeld()
+  {
+    uint16_t exp = expanderState();
+    bool a = !((exp >> EXP_PIN_ENCODER_BTN) & 0x01) && !anyDirectionRawPressed();
+    bool b = !((exp >> EXP_PIN_BUTTON2) & 0x01);
+    return a && b;
+  }
+
+  bool anyButtonHeld()
+  {
+    uint16_t exp = expanderState();
+    bool a = !((exp >> EXP_PIN_ENCODER_BTN) & 0x01) && !anyDirectionRawPressed();
+    bool b = !((exp >> EXP_PIN_BUTTON2) & 0x01);
+    return a || b;
+  }
+
   // Direction switches (joystick tilt) are always instant, single-shot
   // presses - unlike buttons A/B, there's no long-press or double-press
   // meaning on a direction, so this doesn't run through pollButton()'s

@@ -42,6 +42,11 @@ namespace Display {
   // (fieldIndex 0-3, highlighted). Same look as showIpEntry() minus the port.
   void showOtaSendTarget(const uint16_t octets[4], int fieldIndex);
 
+  // ESP-NOW mode's Send/Receive picker: options[i] are the row labels in
+  // carousel order, selectedIndex is drawn highlighted in the middle. The
+  // transfer itself reuses showOtaStatus()/showOtaProgress().
+  void showEspNowMenu(const std::vector<String> &options, int selectedIndex);
+
   // OTA firmware-update screens. showOtaStatus() is a full repaint;
   // showOtaProgress() only redraws the progress bar/percentage so it
   // doesn't flicker while an upload is streaming in.
