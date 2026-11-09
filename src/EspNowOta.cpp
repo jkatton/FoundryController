@@ -4,6 +4,8 @@
 #include <ESP8266WiFi.h>
 #include <Updater.h>
 #include <MD5Builder.h>
+#include <LittleFS.h>
+#include <vector>
 
 extern "C" {
 #include <espnow.h>
@@ -64,6 +66,7 @@ struct __attribute__((packed)) StartBody // START
   uint32_t size;
   char md5[32];
   char version[12];
+  uint16_t configSize; // bytes of config bundle sent before the firmware (0 = none)
 };
 
 static_assert(HDR + ESPNOW_CHUNK_BYTES <= 250, "ESP-NOW payload limit is 250 bytes");
@@ -252,6 +255,81 @@ static void reportProgress(const Callbacks &cb, uint32_t done, uint32_t total, i
   }
 }
 
+// ---------------------------------------------------------------------
+// Config bundle: records of [tag u8][len u16 little-endian][bytes], one per
+// file that exists on the sender.
+// ---------------------------------------------------------------------
+enum : uint8_t { CFG_RELAY = 1, CFG_WIFI = 2, CFG_SETTINGS = 3 };
+
+static const char *configPathForTag(uint8_t tag)
+{
+  switch (tag)
+  {
+  case CFG_RELAY:
+    return RELAY_CONFIG_PATH;
+  case CFG_WIFI:
+    return WIFI_CONFIG_PATH;
+  case CFG_SETTINGS:
+    return SETTINGS_CONFIG_PATH;
+  }
+  return nullptr;
+}
+
+static bool appendConfigFile(std::vector<uint8_t> &blob, uint8_t tag)
+{
+  const char *path = configPathForTag(tag);
+  if (!LittleFS.exists(path))
+    return true; // nothing to send for this one
+  File f = LittleFS.open(path, "r");
+  if (!f)
+    return false;
+  size_t len = f.size();
+  if (len > 0xFFFF)
+  {
+    f.close();
+    return false;
+  }
+  blob.push_back(tag);
+  blob.push_back((uint8_t)(len & 0xFF));
+  blob.push_back((uint8_t)(len >> 8));
+  size_t at = blob.size();
+  blob.resize(at + len);
+  size_t got = len ? f.read(&blob[at], len) : 0;
+  f.close();
+  return got == len;
+}
+
+// Checks the whole bundle is well formed before touching any file, then
+// writes each record to its path. An empty bundle is a no-op success.
+static bool applyConfigBlob(const std::vector<uint8_t> &blob)
+{
+  size_t i = 0;
+  while (i < blob.size())
+  {
+    if (i + 3 > blob.size() || !configPathForTag(blob[i]))
+      return false;
+    size_t len = blob[i + 1] | ((size_t)blob[i + 2] << 8);
+    if (i + 3 + len > blob.size())
+      return false;
+    i += 3 + len;
+  }
+  i = 0;
+  while (i < blob.size())
+  {
+    uint8_t tag = blob[i];
+    size_t len = blob[i + 1] | ((size_t)blob[i + 2] << 8);
+    File f = LittleFS.open(configPathForTag(tag), "w");
+    if (!f)
+      return false;
+    size_t w = len ? f.write(&blob[i + 3], len) : 0;
+    f.close();
+    if (w != len)
+      return false;
+    i += 3 + len;
+  }
+  return true;
+}
+
 // =====================================================================
 // RECEIVER
 // =====================================================================
@@ -271,6 +349,9 @@ Result receiveFirmware(const Callbacks &cb, String &err)
   uint8_t session = 0;
   uint32_t total = 0, received = 0;
   uint16_t expectSeq = 0;
+  uint16_t cfgSize = 0, cfgGot = 0; // config bundle arrives before the firmware
+  bool cfgApplied = false;
+  std::vector<uint8_t> cfgBuf;
   // Version-check prompt in progress (incoming firmware not newer than ours)
   bool pending = false, approved = false;
   uint8_t pendingMac[6] = {0};
@@ -379,6 +460,8 @@ Result receiveFirmware(const Callbacks &cb, String &err)
         ensurePeer(p.mac);
         if (sb.size == 0 || sb.size > ESP.getFreeSketchSpace())
           status = ST_NO_SPACE;
+        else if (sb.configSize > ESPNOW_CONFIG_MAX_BYTES)
+          status = ST_BAD_REQUEST;
         else
         {
           Update.clearError();
@@ -396,8 +479,13 @@ Result receiveFirmware(const Callbacks &cb, String &err)
           total = sb.size;
           received = 0;
           expectSeq = 0;
+          cfgSize = sb.configSize;
+          cfgGot = 0;
+          cfgApplied = false;
+          cfgBuf.clear();
+          cfgBuf.reserve(cfgSize);
           lastRxMs = millis();
-          cb.status("Receiving...", "from " + macToString(peerMac), "Do not power off");
+          cb.status(cfgSize ? "Receiving fw + config" : "Receiving...", "from " + macToString(peerMac), "Do not power off");
           reportProgress(cb, 0, total, lastPct);
         }
         sendPacket(p.mac, PKT_START_ACK, h.session, 0, &status, 1);
@@ -427,27 +515,58 @@ Result receiveFirmware(const Callbacks &cb, String &err)
         if (h.seq > expectSeq)
           break; // gap: ignore, sender will retransmit the missing one
 
-        if (received + bodyLen > total)
-        {
-          uint8_t st = ST_BAD_REQUEST;
-          sendPacket(peerMac, PKT_RESULT, session, 0, &st, 1);
-          Update.end();
-          err = "Bad data from sender";
-          fatal = true;
-          break;
+        if (cfgGot < cfgSize)
+        { // config bundle chunk: held in RAM until the firmware is nearly done
+          if (cfgGot + bodyLen > cfgSize)
+          {
+            sendPacket(peerMac, PKT_ABORT, session, 0);
+            Update.end();
+            err = "Bad config from sender";
+            fatal = true;
+            break;
+          }
+          cfgBuf.insert(cfgBuf.end(), body, body + bodyLen);
+          cfgGot += bodyLen;
         }
-        if (Update.write((uint8_t *)body, bodyLen) != bodyLen)
+        else
         {
-          sendPacket(peerMac, PKT_ABORT, session, 0);
-          Update.end();
-          err = "Flash write failed";
-          fatal = true;
-          break;
+          if (received + bodyLen > total)
+          {
+            uint8_t st = ST_BAD_REQUEST;
+            sendPacket(peerMac, PKT_RESULT, session, 0, &st, 1);
+            Update.end();
+            err = "Bad data from sender";
+            fatal = true;
+            break;
+          }
+          // Apply the config just BEFORE the final firmware chunk goes in:
+          // if writing it fails, Update.end() still aborts cleanly (image
+          // incomplete), so a failure here never stages half an update.
+          if (!cfgApplied && received + bodyLen == total)
+          {
+            if (!applyConfigBlob(cfgBuf))
+            {
+              sendPacket(peerMac, PKT_ABORT, session, 0);
+              Update.end();
+              err = "Config write failed";
+              fatal = true;
+              break;
+            }
+            cfgApplied = true;
+          }
+          if (Update.write((uint8_t *)body, bodyLen) != bodyLen)
+          {
+            sendPacket(peerMac, PKT_ABORT, session, 0);
+            Update.end();
+            err = "Flash write failed";
+            fatal = true;
+            break;
+          }
+          received += bodyLen;
         }
-        received += bodyLen;
         expectSeq++;
         sendPacket(peerMac, PKT_ACK, session, h.seq);
-        reportProgress(cb, received, total, lastPct);
+        reportProgress(cb, cfgGot + received, cfgSize + total, lastPct);
 
         if (received == total)
         {
@@ -630,7 +749,30 @@ static bool computeSketchMd5(uint32_t total, String &out)
   return true;
 }
 
-Result sendFirmware(const Callbacks &cb, String &err)
+enum class Deliver { OK, CANCELLED, ABORTED, LOST };
+
+// Sends one DATA chunk and waits for its ACK, retransmitting on timeout.
+static Deliver deliverChunk(const Callbacks &cb, const uint8_t *target, uint8_t session, uint16_t seq,
+                            const void *data, size_t n)
+{
+  for (int attempt = 0; attempt < ESPNOW_MAX_RETRIES; attempt++)
+  {
+    sendPacket(target, PKT_DATA, session, seq, data, n);
+    Wait w = waitFor(cb, PKT_ACK, target, session, seq, ESPNOW_ACK_TIMEOUT_MS, nullptr);
+    if (w == Wait::GOT)
+      return Deliver::OK;
+    if (w == Wait::CANCELLED)
+    {
+      sendPacket(target, PKT_ABORT, session, 0);
+      return Deliver::CANCELLED;
+    }
+    if (w == Wait::ABORTED)
+      return Deliver::ABORTED;
+  }
+  return Deliver::LOST;
+}
+
+Result sendFirmware(const Callbacks &cb, String &err, bool includeConfig)
 {
   const uint32_t total = ESP.getSketchSize();
   if (total == 0)
@@ -645,6 +787,27 @@ Result sendFirmware(const Callbacks &cb, String &err)
   {
     err = "Flash read failed";
     return Result::FAILED;
+  }
+
+  std::vector<uint8_t> blob; // config bundle (empty when not requested)
+  if (includeConfig)
+  {
+    if (!appendConfigFile(blob, CFG_RELAY) || !appendConfigFile(blob, CFG_WIFI) ||
+        !appendConfigFile(blob, CFG_SETTINGS))
+    {
+      err = "Config read failed";
+      return Result::FAILED;
+    }
+    if (blob.empty())
+    {
+      err = "No saved config to send";
+      return Result::FAILED;
+    }
+    if (blob.size() > ESPNOW_CONFIG_MAX_BYTES)
+    {
+      err = "Config too large";
+      return Result::FAILED;
+    }
   }
 
   if (!radioBegin(err))
@@ -714,6 +877,7 @@ Result sendFirmware(const Callbacks &cb, String &err)
     StartBody sb;
     memset(&sb, 0, sizeof(sb));
     sb.size = total;
+    sb.configSize = (uint16_t)blob.size();
     strncpy(sb.version, FIRMWARE_VERSION, sizeof(sb.version) - 1);
     memcpy(sb.md5, md5.c_str(), 32);
 
@@ -784,13 +948,47 @@ Result sendFirmware(const Callbacks &cb, String &err)
     }
 
     // ---- 3. stream the image, one acknowledged chunk at a time ---------------
-    cb.status("Sending...", "to " + macToString(target), "Hold any button to cancel");
+    cb.status(includeConfig ? "Sending fw + config..." : "Sending...", "to " + macToString(target),
+              "Hold any button to cancel");
     int lastPct = -1;
-    reportProgress(cb, 0, total, lastPct);
+    const uint32_t totalAll = total + (uint32_t)blob.size();
+    uint32_t doneAll = 0;
+    reportProgress(cb, 0, totalAll, lastPct);
 
+    uint16_t seq = 0;
+    Deliver d;
+
+    // Config bundle first (the receiver holds it until the firmware is nearly in)...
+    for (size_t off = 0; off < blob.size();)
+    {
+      size_t n = blob.size() - off;
+      if (n > ESPNOW_CHUNK_BYTES)
+        n = ESPNOW_CHUNK_BYTES;
+      d = deliverChunk(cb, target, session, seq, &blob[off], n);
+      if (d == Deliver::CANCELLED)
+      {
+        result = Result::CANCELLED;
+        goto done;
+      }
+      if (d == Deliver::ABORTED)
+      {
+        err = "Receiver aborted";
+        goto done;
+      }
+      if (d == Deliver::LOST)
+      {
+        err = "Lost contact with receiver";
+        goto done;
+      }
+      off += n;
+      seq++;
+      doneAll += n;
+      reportProgress(cb, doneAll, totalAll, lastPct);
+    }
+
+    // ...then the firmware image.
     uint32_t chunk[ESPNOW_CHUNK_BYTES / 4];
     uint32_t sent = 0;
-    uint16_t seq = 0;
     while (sent < total)
     {
       uint32_t n = total - sent;
@@ -805,34 +1003,26 @@ Result sendFirmware(const Callbacks &cb, String &err)
         err = "Flash read failed";
         goto done;
       }
-
-      bool delivered = false;
-      for (int attempt = 0; attempt < ESPNOW_MAX_RETRIES && !delivered; attempt++)
+      d = deliverChunk(cb, target, session, seq, chunk, n);
+      if (d == Deliver::CANCELLED)
       {
-        sendPacket(target, PKT_DATA, session, seq, chunk, n);
-        Wait w = waitFor(cb, PKT_ACK, target, session, seq, ESPNOW_ACK_TIMEOUT_MS, nullptr);
-        if (w == Wait::GOT)
-          delivered = true;
-        else if (w == Wait::CANCELLED)
-        {
-          sendPacket(target, PKT_ABORT, session, 0);
-          result = Result::CANCELLED;
-          goto done;
-        }
-        else if (w == Wait::ABORTED)
-        {
-          err = "Receiver aborted";
-          goto done;
-        }
+        result = Result::CANCELLED;
+        goto done;
       }
-      if (!delivered)
+      if (d == Deliver::ABORTED)
+      {
+        err = "Receiver aborted";
+        goto done;
+      }
+      if (d == Deliver::LOST)
       {
         err = "Lost contact with receiver";
         goto done;
       }
       sent += n;
       seq++;
-      reportProgress(cb, sent, total, lastPct);
+      doneAll += n;
+      reportProgress(cb, doneAll, totalAll, lastPct);
     }
 
     // ---- 4. END -> RESULT ------------------------------------------------------

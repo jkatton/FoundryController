@@ -3,7 +3,7 @@
 // Firmware version, shown on the Firmware Update (receive) screen and the
 // Send Firmware screens so you can tell units apart and confirm an update
 // took. Bump this by hand whenever you make a build you intend to distribute.
-#define FIRMWARE_VERSION "1.3.0"
+#define FIRMWARE_VERSION "1.3.1"
 
 // =====================================================================
 // PIN CONFIGURATION - Wemos D1 Mini (ESP8266)
@@ -271,6 +271,10 @@
 //   stops asking (it re-sends its request every ~0.5s while waiting).
 #define ESPNOW_CONFIRM_TIMEOUT_MS 60000
 #define ESPNOW_PENDING_STALE_MS    4000
+// "Send FW + Config" bundles RELAY_CONFIG_PATH, WIFI_CONFIG_PATH and
+// SETTINGS_CONFIG_PATH (whichever exist) with the firmware. This caps the
+// bundle's total size; the receiver holds it in RAM until it's applied.
+#define ESPNOW_CONFIG_MAX_BYTES    4096
 
 // LittleFS path used to remember the relay address across reboots
 #define RELAY_CONFIG_PATH "/relay.cfg"

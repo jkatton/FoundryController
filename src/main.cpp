@@ -2449,6 +2449,7 @@ static void renderEspNowMenu()
   std::vector<String> options;
   options.push_back("Receive Firmware");
   options.push_back("Send Firmware");
+  options.push_back("Send FW + Config");
   Display::showEspNowMenu(options, g_espNowIndex);
 }
 
@@ -2494,7 +2495,8 @@ static void enterEspNowMode()
   renderEspNowMenu();
 }
 
-static void runEspNowTransfer(bool send)
+// withConfig (send only): also push relay address, saved WiFi and settings.
+static void runEspNowTransfer(bool send, bool withConfig)
 {
   g_espNowIsSend = send;
   g_state = send ? AppState::ESPNOW_SEND : AppState::ESPNOW_RECEIVE;
@@ -2507,7 +2509,7 @@ static void runEspNowTransfer(bool send)
   cb.confirm = espNowConfirmCb;
 
   String err;
-  EspNowOta::Result r = send ? EspNowOta::sendFirmware(cb, err) : EspNowOta::receiveFirmware(cb, err);
+  EspNowOta::Result r = send ? EspNowOta::sendFirmware(cb, err, withConfig) : EspNowOta::receiveFirmware(cb, err);
 
   if (r == EspNowOta::Result::CANCELLED)
   {
@@ -2552,7 +2554,7 @@ static void handleEspNowResult()
 
 static void handleEspNowMenu()
 {
-  const int count = 2;
+  const int count = 3; // Receive / Send / Send + Config
 
   int32_t delta = InputManager::readEncoderDelta();
   if (delta != 0)
@@ -2561,7 +2563,7 @@ static void handleEspNowMenu()
     renderEspNowMenu();
   }
 
-  // Joystick: up/down move between the two rows, right selects.
+  // Joystick: up/down move between the rows, right selects.
   NavDir nav = pollNavDirection(g_settings.screenRotation);
   if (nav == NavDir::UP || nav == NavDir::DOWN)
   {
@@ -2570,7 +2572,7 @@ static void handleEspNowMenu()
   }
   else if (nav == NavDir::RIGHT)
   {
-    runEspNowTransfer(g_espNowIndex == 1);
+    runEspNowTransfer(g_espNowIndex >= 1, g_espNowIndex == 2);
     return;
   }
 
@@ -2584,7 +2586,7 @@ static void handleEspNowMenu()
   ButtonEvent b = InputManager::pollButtonB();
   if (b == ButtonEvent::SHORT_PRESS)
   {
-    runEspNowTransfer(g_espNowIndex == 1);
+    runEspNowTransfer(g_espNowIndex >= 1, g_espNowIndex == 2);
     return;
   }
   else if (b == ButtonEvent::LONG_PRESS)

@@ -15,7 +15,8 @@
 //   receiver -> sender     HELLO      (version + free flash space)
 //   sender   -> receiver   START      (image size + MD5)
 //   receiver -> sender     START_ACK  (receiver has called Update.begin())
-//   sender   -> receiver   DATA seq   (ESPNOW_CHUNK_BYTES each)
+//   sender   -> receiver   DATA seq   (ESPNOW_CHUNK_BYTES each; the optional
+//                                     config bundle first, then the firmware)
 //   receiver -> sender     ACK  seq   (sender retransmits on timeout)
 //   sender   -> receiver   END
 //   receiver -> sender     RESULT     (image verified against the MD5)
@@ -52,6 +53,10 @@ namespace EspNowOta {
 
   // Finds a receiver, then streams this unit's own running firmware to it.
   // On SUCCESS the receiver has verified the image and is rebooting.
-  Result sendFirmware(const Callbacks &cb, String &err);
+  // includeConfig: also send this unit's relay address, saved WiFi networks
+  // and settings (whichever of those files exist). The receiver overwrites
+  // its own copies just before the last piece of firmware is written, and
+  // only if the whole bundle arrived intact.
+  Result sendFirmware(const Callbacks &cb, String &err, bool includeConfig = false);
 
 }
