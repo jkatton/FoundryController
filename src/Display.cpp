@@ -89,6 +89,7 @@ namespace Display
 #define COL_BG TFT_BLACK
 #define COL_TEXT TFT_WHITE
 #define COL_DIM 0x4A49   // dark grey
+#define COL_HINT 0x94B2  // medium grey (~150/255) for button hints and their pictograms - brighter than COL_DIM so they stay readable, still clearly dimmer than COL_TEXT white
 #define COL_TRACK 0x2965 // ring background track
 #define COL_ACCENT TFT_CYAN
 #define COL_HP_GOOD TFT_GREEN
@@ -586,7 +587,7 @@ static int ringHoleHalfWidth(int absDy)
     {
       Serial.println(message);
     }
-    centeredText(tft, "Press any button to go back", 160, 1, COL_DIM);
+    centeredText(tft, "Press any button to go back", 160, 1, COL_HINT);
   }
 
   void showOtaStatus(const String &line1, const String &line2,
@@ -598,7 +599,7 @@ static int ringHoleHalfWidth(int absDy)
     centeredText(tft, String("v") + FIRMWARE_VERSION, 84, 1, COL_DIM);
     centeredText(tft, line1, 105, 1, COL_TEXT);
     centeredText(tft, line2, 125, 1, COL_TEXT);
-    centeredText(tft, footer, 190, 1, COL_DIM);
+    centeredText(tft, footer, 190, 1, COL_HINT);
   }
 
   void showOtaProgress(int percent)
@@ -655,9 +656,9 @@ static int ringHoleHalfWidth(int absDy)
     tft.drawString(portStr, SCREEN_CX, 158);
 
     tft.setTextSize(1);
-    tft.setTextColor(COL_DIM, COL_BG);
-    drawHint(shortLabel(labelA()) + ":next " + longLabel(labelA()) + ":go", SCREEN_CX, 200, COL_DIM);
-    drawHint(longLabel(labelB()) + ":settings", SCREEN_CX, 215, COL_DIM);
+    tft.setTextColor(COL_HINT, COL_BG);
+    drawHint(shortLabel(labelA()) + "/" + shortLabel(labelB()) + ":go " + longLabel(labelA()) + ":next", SCREEN_CX, 200, COL_HINT);
+    drawHint(longLabel(labelB()) + ":settings", SCREEN_CX, 215, COL_HINT);
 
     if (fakery)
     {
@@ -691,11 +692,11 @@ static int ringHoleHalfWidth(int absDy)
     }
 
     tft.setTextSize(1);
-    tft.setTextColor(COL_DIM, COL_BG);
+    tft.setTextColor(COL_HINT, COL_BG);
     tft.drawString("Target must be on its", SCREEN_CX, 145);
     tft.drawString("Firmware Update screen", SCREEN_CX, 158);
-    drawHint(shortLabel(labelA()) + ":next " + longLabel(labelA()) + ":send", SCREEN_CX, 200, COL_DIM);
-    drawHint(longLabel(labelB()) + ":back", SCREEN_CX, 215, COL_DIM);
+    drawHint(shortLabel(labelA()) + ":next " + longLabel(labelA()) + ":send", SCREEN_CX, 200, COL_HINT);
+    drawHint(longLabel(labelB()) + ":back", SCREEN_CX, 215, COL_HINT);
   }
 
   void showEspNowMenu(const std::vector<String> &options, int selectedIndex)
@@ -733,10 +734,10 @@ static int ringHoleHalfWidth(int absDy)
     }
 
     tft.setTextSize(1);
-    tft.setTextColor(COL_DIM, COL_BG);
+    tft.setTextColor(COL_HINT, COL_BG);
     tft.setTextDatum(MC_DATUM);
-    drawHint(shortLabel(labelA()) + ":next " + shortLabel(labelB()) + ":select", SCREEN_CX, 200, COL_DIM);
-    drawHint(longLabel(labelB()) + ":exit", SCREEN_CX, 215, COL_DIM);
+    drawHint(shortLabel(labelA()) + ":next " + shortLabel(labelB()) + ":select", SCREEN_CX, 200, COL_HINT);
+    drawHint(longLabel(labelB()) + ":exit", SCREEN_CX, 215, COL_HINT);
   }
 
   void showSettings(const std::vector<String> &names, const std::vector<String> &values, int selectedIndex)
@@ -791,10 +792,10 @@ static int ringHoleHalfWidth(int absDy)
     }
 
     tft.setTextSize(1);
-    tft.setTextColor(COL_DIM, COL_BG);
+    tft.setTextColor(COL_HINT, COL_BG);
     tft.setTextDatum(MC_DATUM);
-    drawHint(shortLabel(labelA()) + ":next", SCREEN_CX, 200, COL_DIM);
-    drawHint(longLabel(labelA()) + ":save " + longLabel(labelB()) + ":back", SCREEN_CX, 215, COL_DIM);
+    drawHint(shortLabel(labelA()) + ":next", SCREEN_CX, 200, COL_HINT);
+    drawHint(longLabel(labelA()) + ":save " + longLabel(labelB()) + ":back", SCREEN_CX, 215, COL_HINT);
   }
 
   void showWifiList(const std::vector<String> &ssids, const std::vector<String> &notes,
@@ -856,11 +857,11 @@ static int ringHoleHalfWidth(int absDy)
     }
 
     tft.setTextSize(1);
-    tft.setTextColor(COL_DIM, COL_BG);
+    tft.setTextColor(COL_HINT, COL_BG);
     tft.setTextDatum(MC_DATUM);
     if (n > 0)
-      drawHint(shortLabel(labelA()) + ":next " + shortLabel(labelB()) + ":delete", SCREEN_CX, 200, COL_DIM);
-    drawHint(longLabel(labelA()) + "/" + longLabel(labelB()) + ":back", SCREEN_CX, 215, COL_DIM);
+      drawHint(shortLabel(labelA()) + ":next " + shortLabel(labelB()) + ":delete", SCREEN_CX, 200, COL_HINT);
+    drawHint(longLabel(labelA()) + "/" + longLabel(labelB()) + ":back", SCREEN_CX, 215, COL_HINT);
   }
 
   void showCharacterList(const std::vector<Character> &chars, int selectedIndex)
@@ -942,10 +943,10 @@ static int ringHoleHalfWidth(int absDy)
     }
 
     tft.setTextSize(1);
-    tft.setTextColor(COL_DIM, COL_BG);
+    tft.setTextColor(COL_HINT, COL_BG);
     tft.setTextDatum(MC_DATUM);
-    drawHint(shortLabel(labelA()) + ":select", SCREEN_CX, 200, COL_DIM);
-    drawHint(longLabel(labelB()) + ":IP input", SCREEN_CX, 215, COL_DIM);
+    drawHint(shortLabel(labelA()) + "/" + shortLabel(labelB()) + ":select", SCREEN_CX, 200, COL_HINT);
+    drawHint(longLabel(labelA()) + "/" + longLabel(labelB()) + ":IP input", SCREEN_CX, 215, COL_HINT);
 
     s_listValid = true;
     s_lastListChars = chars;
@@ -2024,8 +2025,8 @@ static int ringHoleHalfWidth(int absDy)
       // No "Updating..." status while the radius preview is in flight - it
       // only flashed for a moment on every radius change, so the hint row
       // just stays put (circle.sending is still set by main.cpp, but unused here).
-      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, longLabel(labelA()) + "/" + longLabel(labelB()) + ":draw", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
-      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, shortLabel(labelA()) + "/" + shortLabel(labelB()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, longLabel(labelA()) + "/" + longLabel(labelB()) + ":draw", 1, COL_HINT, forceRowsRedraw, 0, statusRow1HalfWidth);
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, shortLabel(labelA()) + "/" + shortLabel(labelB()) + ":back", 1, COL_HINT, forceRowsRedraw, 0, statusRow2HalfWidth);
       return;
     }
 
@@ -2042,12 +2043,12 @@ static int ringHoleHalfWidth(int absDy)
       if (elev.sending)
       {
         drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Sending...", 1, COL_ACCENT, forceRowsRedraw, 0, statusRow1HalfWidth);
-        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, " ", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, " ", 1, COL_HINT, forceRowsRedraw, 0, statusRow2HalfWidth);
       }
       else
       {
-        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + "/" + shortLabel(labelB()) + ":set", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
-        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, longLabel(labelA()) + "/" + longLabel(labelB()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+        drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + "/" + shortLabel(labelB()) + ":set", 1, COL_HINT, forceRowsRedraw, 0, statusRow1HalfWidth);
+        drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, longLabel(labelA()) + "/" + longLabel(labelB()) + ":back", 1, COL_HINT, forceRowsRedraw, 0, statusRow2HalfWidth);
       }
       return;
     }
@@ -2069,8 +2070,8 @@ static int ringHoleHalfWidth(int absDy)
 
       // No "Moving..." status while a preview is in flight - same reasoning
       // as the circle branch above; the hint row just stays put.
-      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + ":move", 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
-      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, longLabel(labelA()) + ":back", 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, shortLabel(labelA()) + ":move", 1, COL_HINT, forceRowsRedraw, 0, statusRow1HalfWidth);
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, longLabel(labelA()) + ":back", 1, COL_HINT, forceRowsRedraw, 0, statusRow2HalfWidth);
       return;
     }
 
@@ -2115,12 +2116,12 @@ static int ringHoleHalfWidth(int absDy)
     if (sending || elev.sending) // elevation is applied on screen right away, so its "Sending..." shows here, outside elevation mode
     {
       drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Sending...", 1, COL_ACCENT, forceRowsRedraw, 0, statusRow1HalfWidth);
-      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, " ", 1, COL_DIM, forceRowsRedraw);
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, " ", 1, COL_HINT, forceRowsRedraw);
     }
     else if (justSent)
     {
       drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, "Sent!", 1, COL_HP_GOOD, forceRowsRedraw);
-      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, " ", 1, COL_DIM, forceRowsRedraw);
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, " ", 1, COL_HINT, forceRowsRedraw);
     }
     else
     {
@@ -2145,12 +2146,12 @@ static int ringHoleHalfWidth(int absDy)
       {
         row1 = toggleFull;
       }
-      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, row1, 1, COL_DIM, forceRowsRedraw, 0, statusRow1HalfWidth);
+      drawTextRow(ROW_STATUS_1, SCREEN_CY + 65, 14, row1, 1, COL_HINT, forceRowsRedraw, 0, statusRow1HalfWidth);
       // With nothing pending (no queued HP change, no background move), a long
       // press of Button A leaves for the character list rather than just
       // backing out of an edit, so say so.
       const bool nothingPending = !hpChangeQueued && !move.pending;
-      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, longLabel(labelA()) + (nothingPending ? ":char list" : ":back"), 1, COL_DIM, forceRowsRedraw, 0, statusRow2HalfWidth);
+      drawTextRow(ROW_STATUS_2, SCREEN_CY + 80, 14, longLabel(labelA()) + (nothingPending ? ":char list" : ":back"), 1, COL_HINT, forceRowsRedraw, 0, statusRow2HalfWidth);
     }
   }
 

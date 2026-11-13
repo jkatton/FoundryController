@@ -778,13 +778,14 @@ static void handleIpEntry()
     Display::showIpEntry(g_ipFields, g_ipFieldIndex, g_settings.relayTestMode);
   }
 
+  // Buttons (polled together so both debounce states stay current):
+  //   short press of either  -> go (connect to the entered address)
+  //   long press of A        -> next field
+  //   long press of B        -> settings carousel (see enterSettings()/handleSettings())
   ButtonEvent a = InputManager::pollButtonA();
-  if (a == ButtonEvent::SHORT_PRESS)
-  {
-    g_ipFieldIndex = (g_ipFieldIndex + 1) % 5;
-    Display::showIpEntry(g_ipFields, g_ipFieldIndex, g_settings.relayTestMode);
-  }
-  else if (a == ButtonEvent::LONG_PRESS)
+  ButtonEvent b = InputManager::pollButtonB();
+
+  if (a == ButtonEvent::SHORT_PRESS || b == ButtonEvent::SHORT_PRESS)
   {
     String host = String(g_ipFields[0]) + "." + String(g_ipFields[1]) + "." +
                   String(g_ipFields[2]) + "." + String(g_ipFields[3]);
@@ -800,11 +801,15 @@ static void handleIpEntry()
     {
       goToError("connect failed: " + RelayClient::lastError(), AppState::IP_ENTRY);
     }
+    return;
   }
 
-  // Button B: long-press opens the settings carousel (screen rotation, HP
-  // gauge style, ...). See enterSettings()/handleSettings().
-  ButtonEvent b = InputManager::pollButtonB();
+  if (a == ButtonEvent::LONG_PRESS)
+  {
+    g_ipFieldIndex = (g_ipFieldIndex + 1) % 5;
+    Display::showIpEntry(g_ipFields, g_ipFieldIndex, g_settings.relayTestMode);
+  }
+
   if (b == ButtonEvent::LONG_PRESS)
   {
     enterSettings();
@@ -1378,28 +1383,20 @@ static void handleCharacterList()
     }
   }
 
+  // Short press of either button selects the highlighted character; long
+  // press of either goes back to IP input to reconfigure the server address.
+  // Both are polled every pass so each button's debounce state stays current.
   ButtonEvent a = InputManager::pollButtonA();
-  if (a == ButtonEvent::SHORT_PRESS)
+  ButtonEvent b = InputManager::pollButtonB();
+
+  if (a == ButtonEvent::SHORT_PRESS || b == ButtonEvent::SHORT_PRESS)
   {
     enterDetailForSelected();
     return;
   }
 
-  else if (a == ButtonEvent::DOUBLE_PRESS)
+  if (a == ButtonEvent::LONG_PRESS || b == ButtonEvent::LONG_PRESS)
   {
-    // Reconfigure server address from scratch.
-    RelayClient::begin("", 0);
-    enterIpEntryDefaults();
-    return;
-  }
-  // else if (a == ButtonEvent::LONG_PRESS) {
-  //   loadCharacterList(); // manual refresh
-  // }
-
-  ButtonEvent b = InputManager::pollButtonB();
-  if (b == ButtonEvent::LONG_PRESS)
-  {
-    // Reconfigure server address from scratch.
     RelayClient::begin("", 0);
     enterIpEntryDefaults();
     return;
