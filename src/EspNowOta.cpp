@@ -620,6 +620,12 @@ Result receiveFirmware(const Callbacks &cb, String &err)
       break;
     }
 
+    // Packet handling above stamps pendingLastMs/lastRxMs/finalizedMs/
+    // resultSentMs with a fresh millis(), which can be LATER than the `now`
+    // captured at the top of this iteration. Refresh it, or the unsigned
+    // `now - stamp` checks below wrap to a huge number and fire instantly.
+    now = millis();
+
     // Version-check prompt: act on the user's answer. "Install" is picked up
     // by the sender's next START (it repeats about every 0.5s).
     if (pending && !active)
